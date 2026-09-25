@@ -294,6 +294,30 @@ def trace_kmz(coords):
     return out
 
 
+def stop_dists(g, coords):
+    """Metres along polyline g where each stop projects, never going backwards (loops safe)."""
+    cum = [0.0]
+    for a, b in zip(g, g[1:]):
+        cum.append(cum[-1] + dist(a, b))
+    out, seg = [], 0
+    for n, c in enumerate(coords):
+        best, bd = None, 1e18
+        for k in range(seg, len(g) - 1 if n else 1):
+            d = seg_dist(c, g[k], g[k + 1])
+            if d < bd:
+                bd, best = d, k
+            elif bd < 30 and d > bd + 150:
+                break  # first close pass taken; a loop coming back later must not win
+        seg = best if best is not None else seg
+        a, b = g[seg], g[min(seg + 1, len(g) - 1)]
+        L = dist(a, b)
+        t = 0 if L == 0 else max(0, min(1, (dist(a, c) ** 2 - dist(b, c) ** 2 + L * L) / (2 * L * L)))
+        out.append(round(cum[seg] + t * L))
+    for i in range(1, len(out)):
+        out[i] = max(out[i], out[i - 1])
+    return out
+
+
 # ---------------------------------------------------------------- assemble
 stops_out, stop_index = [], {}
 for op, d in ops.items():
@@ -303,6 +327,7 @@ for op, d in ops.items():
 
 stats = collections.Counter()
 lines_out = {}
+pid_map = {}  # NeTEx ServiceJourneyPattern id -> output pattern dict
 for op, d in ops.items():
     for L in d['lines']:
         code = L['name'] if op == 'mm' else L['short']
@@ -313,13 +338,13 @@ for op, d in ops.items():
                               'color': ('#' + L['color']) if L.get('color') else None,
                               'colourName': colour_name, 'pats': []}
         LO = lines_out[key]
-        seen = set()
+        seen = {}
         for P in L['patterns']:
             coords = [tuple(d['stops'][s]['ll']) for s in P['stops']]
             sig = tuple(P['stops'])
             if sig in seen:
+                pid_map[P['id']] = seen[sig]
                 continue
-            seen.add(sig)
             geom, roads, src = None, None, None
             og, oroads = osrm_geom_roads(osrm_for(coords), coords)
             if op == 'smtuc' and SMTUC_SHAPES:
@@ -342,11 +367,15 @@ for op, d in ops.items():
                 geom, src = coords, 'stops'
             stats[(op, src)] += 1
             g = rdp(geom, 5.0)
-            LO['pats'].append({
+            g = [(round(a, 5), round(b, 5)) for a, b in g]
+            pat = {
                 'dir': P['dir'], 'var': L['name'] if op != 'mm' else None,
                 's': [stop_index[(op, s)] for s in P['stops']],
-                'g': encode(g), 'km': round(length(geom) / 1000, 1),
-                'r': roads or [], 'n': P['trips'], 'f': P['first'], 'l': P['last'], 'src': src})
+                'g': encode(g), 'sd': stop_dists(g, coords), 'km': round(length(geom) / 1000, 1),
+                'r': roads or [], 'n': P['trips'], 'f': P['first'], 'l': P['last'], 'src': src}
+            LO['pats'].append(pat)
+            seen[sig] = pat
+            pid_map[P['id']] = pat
 
 
 def sort_key(L):
@@ -369,6 +398,35 @@ bundle = {
         *(['SMTUC GTFS (dados.gov.pt), 2026-09-14'] if SMTUC_SHAPES else []),
         'Road paths: OSRM on © OpenStreetMap contributors, ODbL 1.0'],
     'stops': stops_out, 'lines': out_lines}
+# ---------------------------------------------------------------- timetable bundle
+idx = {}
+for li, L in enumerate(out_lines):
+    for pi, p in enumerate(L['pats']):
+        idx[id(p)] = (li, pi)
+cals, cal_idx, profs, prof_idx, rows = [], {}, [], {}, []
+for op, d in ops.items():
+    for dt, (frm, bits) in d['calendars'].items():
+        cal_idx[(op, dt)] = len(cals)
+        cals.append([frm, bits.rstrip('0') or '0'])
+    for j in d['journeys']:
+        p = pid_map.get(j['p'])
+        if p is None or not j['cal']:
+            continue
+        t = [[a if a is not None else dd, dd if dd is not None else a] for a, dd in j['t']]
+        start = t[0][1]
+        key = tuple(v - start for pair in t for v in pair)
+        if key not in prof_idx:
+            prof_idx[key] = len(profs)
+            profs.append(list(key))
+        c = [cal_idx[(op, x)] for x in j['cal']]
+        li, pi = idx[id(p)]
+        rows.append([li, pi, c[0] if len(c) == 1 else c, start, prof_idx[key], j['trip'] if op == 'smtuc' else 0])
+tt = {'cal': cals, 'prof': profs, 'j': rows}
+tjs = 'window.TIMETABLE=' + json.dumps(tt, ensure_ascii=False, separators=(',', ':')) + ';\n'
+tpath = os.path.join(os.path.dirname(os.path.abspath(OUT)), 'timetable.js')
+open(tpath, 'w', encoding='utf-8').write(tjs)
+print('wrote', tpath, round(len(tjs.encode()) / 1e6, 2), 'MB', 'journeys', len(rows), 'profiles', len(profs), 'calendars', len(cals))
+
 js = 'window.TRANSIT=' + json.dumps(bundle, ensure_ascii=False, separators=(',', ':')) + ';\n'
 open(OUT, 'w', encoding='utf-8').write(js)
 print('wrote', OUT, round(len(js.encode()) / 1e6, 2), 'MB', 'lines', len(out_lines), 'stops', len(stops_out))

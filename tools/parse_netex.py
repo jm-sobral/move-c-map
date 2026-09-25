@@ -41,8 +41,12 @@ def parse(path):
     first_dep = collections.defaultdict(list)  # sjp id -> departure times at first stop
     trip_ids = collections.defaultdict(list)  # sjp id -> gtfs trip ids (sample)
     daytypes = collections.defaultdict(set)
+    journeys = []   # raw: (pattern id, trip id, [daytype ids], [(spijp ref, arr s, dep s)])
+    periods = {}    # UicOperatingPeriod id -> (from date YYYYMMDD, ValidDayBits)
+    dta = {}        # DayType id -> OperatingPeriod id (only isAvailable=true)
 
-    wanted = {'ScheduledStopPoint', 'Line', 'Route', 'ServiceJourneyPattern', 'ServiceJourney'}
+    wanted = {'ScheduledStopPoint', 'Line', 'Route', 'ServiceJourneyPattern', 'ServiceJourney',
+              'UicOperatingPeriod', 'DayTypeAssignment'}
     for ev, el in ET.iterparse(path, events=('end',)):
         t = local(el.tag)
         if t not in wanted:
@@ -85,6 +89,17 @@ def parse(path):
                 trip_ids[p].append(g)
             for dt in el.iter(NS + 'DayTypeRef'):
                 daytypes[p].add(dt.get('ref'))
+            times = []
+            for tp in (pts if pts is not None else []):
+                times.append((tp.find(NS + 'StopPointInJourneyPatternRef').get('ref'),
+                              secs(txt(tp, 'ArrivalTime'), txt(tp, 'ArrivalDayOffset')),
+                              secs(txt(tp, 'DepartureTime'), txt(tp, 'DepartureDayOffset'))))
+            journeys.append((p, g, sorted(dt.get('ref') for dt in el.iter(NS + 'DayTypeRef')), times))
+        elif t == 'UicOperatingPeriod':
+            periods[i] = (txt(el, 'FromDate')[:10].replace('-', ''), txt(el, 'ValidDayBits'))
+        elif t == 'DayTypeAssignment':
+            if (txt(el, 'isAvailable') or 'true') == 'true' and el.find(NS + 'OperatingPeriodRef') is not None:
+                dta[el.find(NS + 'DayTypeRef').get('ref')] = el.find(NS + 'OperatingPeriodRef').get('ref')
         el.clear()
 
     out_lines = []
@@ -99,7 +114,27 @@ def parse(path):
                          'first': deps[0] if deps else None, 'last': deps[-1] if deps else None,
                          'gtrips': trip_ids[pid]})
         out_lines.append({**L, 'id': lid, 'patterns': pats})
-    return {'stops': ssp, 'lines': out_lines}
+    # journeys: resolve passing-time refs to positions in the pattern; arrival/departure seconds
+    cal = {dt: periods[op] for dt, op in dta.items() if op in periods}
+    out_j = []
+    bad = 0
+    for p, g, dts, times in journeys:
+        seq = sjp.get(p)
+        if not seq or len(times) != len(seq['stops']):
+            bad += 1
+            continue
+        out_j.append({'p': p, 'trip': g, 'cal': [d for d in dts if d in cal],
+                      't': [[a, d] for _, a, d in times]})
+    if bad:
+        print('  journeys skipped (stop count mismatch):', bad)
+    return {'stops': ssp, 'lines': out_lines, 'journeys': out_j, 'calendars': cal}
+
+
+def secs(hms, offset):
+    if not hms:
+        return None
+    h, m, s = (int(x) for x in hms.split(':'))
+    return (int(offset or 0) * 24 + h) * 3600 + m * 60 + s
 
 
 if __name__ == '__main__':
@@ -108,4 +143,4 @@ if __name__ == '__main__':
     json.dump(d, open(dst, 'w', encoding='utf-8'), ensure_ascii=False)
     np = sum(len(l['patterns']) for l in d['lines'])
     print(dst, 'stops', len(d['stops']), 'lines', len(d['lines']), 'patterns', np,
-          'no-trip patterns', sum(1 for l in d['lines'] for p in l['patterns'] if not p['trips']))
+          'journeys', len(d['journeys']), 'calendars', len(d['calendars']))
