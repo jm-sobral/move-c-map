@@ -733,8 +733,17 @@
   });
   $('#t-now').addEventListener('click', () => { veh.offsetMs = 0; $('#time-form').hidden = true; tick(); pollGps(); renderView(); });
 
+  function vehFail(msg) {
+    $('#clock').textContent = 'Vehicles unavailable';
+    $('#vstats').textContent = msg;
+  }
   function initVehicles() {
+    clearTimeout(slowTimer);
     veh.tt = window.TIMETABLE;
+    if (!veh.tt || !Array.isArray(veh.tt.j)) return vehFail('timetable.js loaded but holds no timetable. Upload the timetable.js produced by the same build as data.js.');
+    if (veh.tt.generated !== DATA.generated) {
+      return vehFail(`timetable.js (${veh.tt.generated || 'older build'}) and data.js (${DATA.generated}) come from different builds. Upload both files from the same build.`);
+    }
     veh.tt.j.forEach((r, i) => {
       const k = r[0] + ':' + r[1];
       if (!veh.patRows.has(k)) veh.patRows.set(k, []);
@@ -742,17 +751,20 @@
       if (r[5]) veh.tripRow.set(r[5], i);
     });
     veh.ready = true;
-    tick(); renderView(); pollGps();
+    try { tick(); } catch (err) { veh.ready = false; return vehFail('Vehicle positions failed: ' + err.message); }
+    renderView(); pollGps();
     setInterval(() => { if (!document.hidden) tick(); }, 2000);
     setInterval(() => { if (!document.hidden) pollGps(); }, 30000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - veh.gps.at > 30000) pollGps(); });
   }
   map.on('zoomend', () => map.getContainer().classList.toggle('zlow', map.getZoom() < 13));
   map.getContainer().classList.toggle('zlow', map.getZoom() < 13);
+  // The build stamp in the URL makes each deploy fetch its own timetable instead of a cached one.
   const ttScript = document.createElement('script');
-  ttScript.src = 'timetable.js';
+  ttScript.src = 'timetable.js?v=' + encodeURIComponent(DATA.generated);
   ttScript.onload = initVehicles;
-  ttScript.onerror = () => { $('#vstats').textContent = 'Timetables could not be loaded.'; };
+  ttScript.onerror = () => { clearTimeout(slowTimer); vehFail('timetable.js was not found next to index.html. Upload it with the other files.'); };
+  const slowTimer = setTimeout(() => { if (!veh.ready) $('#vstats').textContent = 'Still downloading timetables (1 MB)…'; }, 8000);
   document.head.appendChild(ttScript);
 
   // ------------------------------------------------------------------ theme changes

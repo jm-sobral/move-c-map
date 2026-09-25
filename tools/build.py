@@ -12,6 +12,7 @@ args = [a for a in sys.argv[1:] if not a.startswith('--')]
 OUT = args[0] if args else 'data.js'
 # SMTUC GTFS carries no licence on dados.gov.pt; its shapes are opt-in until one is published.
 SMTUC_SHAPES = '--smtuc-shapes' in sys.argv
+STAMP = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')  # shared by data.js and timetable.js
 csv.field_size_limit(10**9)
 
 # ---------------------------------------------------------------- geometry helpers
@@ -391,7 +392,7 @@ for L in out_lines:
     L['pats'].sort(key=lambda p: (p['dir'] != 'outbound', -len(p['s']), -p['km'], -p['n']))
 
 bundle = {
-    'generated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+    'generated': STAMP,
     'sources': [
         'AGIT NeTEx EPIP (api.planner.agit.pt), 2026-09-23, CC BY 4.0',
         'Rede Metrobus KMZ, Metro Mondego (dados.gov.pt), 2026-08-17, CC BY',
@@ -421,7 +422,7 @@ for op, d in ops.items():
         c = [cal_idx[(op, x)] for x in j['cal']]
         li, pi = idx[id(p)]
         rows.append([li, pi, c[0] if len(c) == 1 else c, start, prof_idx[key], j['trip'] if op == 'smtuc' else 0])
-tt = {'cal': cals, 'prof': profs, 'j': rows}
+tt = {'generated': STAMP, 'cal': cals, 'prof': profs, 'j': rows}
 tjs = 'window.TIMETABLE=' + json.dumps(tt, ensure_ascii=False, separators=(',', ':')) + ';\n'
 tpath = os.path.join(os.path.dirname(os.path.abspath(OUT)), 'timetable.js')
 open(tpath, 'w', encoding='utf-8').write(tjs)
@@ -430,4 +431,13 @@ print('wrote', tpath, round(len(tjs.encode()) / 1e6, 2), 'MB', 'journeys', len(r
 js = 'window.TRANSIT=' + json.dumps(bundle, ensure_ascii=False, separators=(',', ':')) + ';\n'
 open(OUT, 'w', encoding='utf-8').write(js)
 print('wrote', OUT, round(len(js.encode()) / 1e6, 2), 'MB', 'lines', len(out_lines), 'stops', len(stops_out))
+
+# cache-bust the page's script tags so a deploy never mixes files from two builds
+page = os.path.join(os.path.dirname(os.path.abspath(OUT)), 'index.html')
+if os.path.exists(page):
+    ver = STAMP.replace(' ', 'T').replace(':', '')
+    html = open(page, encoding='utf-8').read()
+    html = re.sub(r'src="(data|app)\.js(\?v=[^"]*)?"', lambda m: f'src="{m.group(1)}.js?v={ver}"', html)
+    open(page, 'w', encoding='utf-8').write(html)
+    print('stamped', page, ver)
 print(dict(stats))
