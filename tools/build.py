@@ -370,7 +370,7 @@ for op, d in ops.items():
             g = rdp(geom, 5.0)
             g = [(round(a, 5), round(b, 5)) for a, b in g]
             pat = {
-                'dir': P['dir'], 'var': L['name'] if op != 'mm' else None,
+                '_g': g, 'dir': P['dir'], 'var': L['name'] if op != 'mm' else None,
                 's': [stop_index[(op, s)] for s in P['stops']],
                 'g': encode(g), 'sd': stop_dists(g, coords), 'km': round(length(geom) / 1000, 1),
                 'r': roads or [], 'n': P['trips'], 'f': P['first'], 'l': P['last'], 'src': src}
@@ -391,7 +391,67 @@ for L in out_lines:
     # most extensive schedule first within each direction
     L['pats'].sort(key=lambda p: (p['dir'] != 'outbound', -len(p['s']), -p['km'], -p['n']))
 
+# ---------------------------------------------------------------- network overview
+# Every road segment once per operator, chained into polylines whose set of lines is constant.
+# The overview draws these instead of every variant: ~5x fewer points to project on each zoom.
+def network_chains(op):
+    seg = collections.defaultdict(set)
+    adj = collections.defaultdict(set)
+    for li, L in enumerate(out_lines):
+        if L['op'] != op:
+            continue
+        for p in L['pats']:
+            pts = [(round(a * 1e5), round(b * 1e5)) for a, b in p['_g']]
+            for u, v in zip(pts, pts[1:]):
+                if u == v:
+                    continue
+                seg[(min(u, v), max(u, v))].add(li)
+                adj[u].add(v)
+                adj[v].add(u)
+    key = lambda u, v: (min(u, v), max(u, v))
+
+    def is_break(n):
+        nb = list(adj[n])
+        return len(nb) != 2 or seg[key(n, nb[0])] != seg[key(n, nb[1])]
+
+    done, chains = set(), []
+
+    def walk(start, nxt):
+        path, prev, cur = [start, nxt], start, nxt
+        done.add(key(start, nxt))
+        ls = seg[key(start, nxt)]
+        while not is_break(cur):
+            (step,) = [x for x in adj[cur] if x != prev] or [None]
+            if step is None or key(cur, step) in done or seg[key(cur, step)] != ls:
+                break
+            done.add(key(cur, step))
+            path.append(step)
+            prev, cur = cur, step
+        chains.append([encode([(a / 1e5, b / 1e5) for a, b in path]), sorted(ls)])
+
+    for n in list(adj):
+        if is_break(n):
+            for m in adj[n]:
+                if key(n, m) not in done:
+                    walk(n, m)
+    for (u, v) in seg:
+        if (u, v) not in done:
+            walk(u, v)
+    # one multi-part polyline per set of lines keeps the layer count low
+    groups = collections.defaultdict(list)
+    for enc, ls in chains:
+        groups[tuple(ls)].append(enc)
+    return [[parts, list(ls)] for ls, parts in groups.items()]
+
+
+net = {op: network_chains(op) for op in ('smtuc', 'mm', 'sit')}
+print('network groups', {op: len(c) for op, c in net.items()})
+for L in out_lines:
+    for p in L['pats']:
+        p.pop('_g', None)
+
 bundle = {
+    'net': net,
     'generated': STAMP,
     'sources': [
         'AGIT NeTEx EPIP (api.planner.agit.pt), 2026-09-23, CC BY 4.0',

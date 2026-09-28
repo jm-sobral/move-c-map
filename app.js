@@ -119,28 +119,76 @@
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   }).addTo(map);
 
+  // Leaflet re-projects every vertex (spherical Mercator: trig + log) on every zoom. For the
+  // thousands of static network shapes, project once at zoom 0 and only rescale afterwards:
+  // at zoom z the layer point is p0 * 2^z - pixelOrigin, exact for Web Mercator.
+  function zoomScale(m) { return m.getZoomScale(m.getZoom(), 0); }
+  const FastPolyline = L.Polyline.extend({
+    _projectLatlngs(latlngs, result, bounds) {
+      const m = this._map;
+      if (!this._p0) {
+        const rings = latlngs[0] instanceof L.LatLng ? [latlngs] : latlngs;
+        this._p0 = rings.map((ring) => {
+          const a = new Float64Array(ring.length * 2);
+          ring.forEach((ll, i) => { const p = m.project(ll, 0); a[2 * i] = p.x; a[2 * i + 1] = p.y; });
+          return a;
+        });
+      }
+      const s = zoomScale(m), o = m.getPixelOrigin();
+      for (const a of this._p0) {
+        const ring = new Array(a.length / 2);
+        for (let i = 0; i < ring.length; i++) {
+          const p = new L.Point(Math.round(a[2 * i] * s) - o.x, Math.round(a[2 * i + 1] * s) - o.y);
+          ring[i] = p;
+          bounds.extend(p);
+        }
+        result.push(ring);
+      }
+    },
+  });
+  const FastCircleMarker = L.CircleMarker.extend({
+    _project() {
+      const m = this._map;
+      if (!this._p0) this._p0 = m.project(this._latlng, 0);
+      const s = zoomScale(m), o = m.getPixelOrigin();
+      this._point = new L.Point(Math.round(this._p0.x * s) - o.x, Math.round(this._p0.y * s) - o.y);
+      this._updateBounds();
+    },
+  });
+
   const net = {}, stopLayers = {};
+  const DRAW_ORDER = ['sit', 'smtuc', 'mm']; // regional lines under urban ones
+  function netTooltip(ls) {
+    const shown = ls.slice(0, 8).map((li) => badge(lines[li], 'sm')).join(' ');
+    return `<div class="tt-lines">${shown}${ls.length > 8 ? ` +${ls.length - 8}` : ''}</div>${ls.length === 1 ? esc(lineTitle(lines[ls[0]])) : 'Click to choose a line'}`;
+  }
+  function netPopup(ls) {
+    return `<div class="vp"><b>${ls.length} lines use this road</b><div class="pick">${ls.map((li) =>
+      `<button type="button" class="pick-row" data-vline="${li}" data-vpat="0">${badge(lines[li], 'sm')}<span>${esc(lineTitle(lines[li]))}</span></button>`).join('')}</div></div>`;
+  }
   function buildNetwork() {
-    OP_ORDER.forEach((op) => {
+    DRAW_ORDER.forEach((op) => {
       if (net[op]) map.removeLayer(net[op]);
       if (stopLayers[op]) map.removeLayer(stopLayers[op]);
+      // one layer per group of road segments shared by the same lines (built by tools/build.py)
       const g = L.layerGroup();
-      // draw regional lines below urban ones
-      lines.filter((L) => L.op === op).forEach((Ln) => {
-        const c = lineColour(Ln);
-        Ln.pats.forEach((p) => {
-          const pl = L.polyline(p.pts, { renderer: rNet, color: c, weight: op === 'sit' ? 2.2 : 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round', dashArray: p.src === 'stops' ? '2 7' : null });
-          pl.bindTooltip(`<b>${esc(OPS[op].name)} ${esc(Ln.code)}</b><br>${esc(lineTitle(Ln))}`, { sticky: true, className: 'tt', direction: 'top', offset: [0, -6] });
-          pl.on('click', (e) => { L.DomEvent.stop(e); selectLine(Ln.li, p.pi); });
-          pl._op = op;
-          g.addLayer(pl);
+      const opColour = cssVar('--' + op);
+      DATA.net[op].forEach(([parts, ls]) => {
+        const c = op === 'mm' ? lineColour(lines[ls[0]]) : opColour;
+        const pl = new FastPolyline(parts.map(decode), { renderer: rNet, color: c, weight: op === 'sit' ? 2.2 : 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' });
+        pl.bindTooltip(() => netTooltip(ls), { sticky: true, className: 'tt', direction: 'top', offset: [0, -6] });
+        pl.on('click', (e) => {
+          L.DomEvent.stop(e);
+          if (ls.length === 1) selectLine(ls[0], 0);
+          else L.popup({ className: 'veh-pop', maxWidth: 300 }).setLatLng(e.latlng).setContent(netPopup(ls)).openOn(map);
         });
+        g.addLayer(pl);
       });
       net[op] = g;
       const sg = L.layerGroup();
       liveStops.filter((s) => s.op === op).forEach((s) => {
-        const m = L.circleMarker(s.ll, { renderer: rStops, radius: op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
-        m.bindTooltip(`<b>${esc(s.name)}</b><br>${esc(OPS[op].name)} · ${linesAt(s).length} line(s)`, { className: 'tt', direction: 'top', offset: [0, -4] });
+        const m = new FastCircleMarker(s.ll, { renderer: rStops, radius: op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
+        m.bindTooltip(() => `<b>${esc(s.name)}</b><br>${esc(OPS[op].name)} · ${linesAt(s).length} line(s)`, { className: 'tt', direction: 'top', offset: [0, -4] });
         m.on('click', (e) => { L.DomEvent.stop(e); selectStop(s.i); });
         sg.addLayer(m);
       });
@@ -150,22 +198,24 @@
   }
   function lineColourOp(op) { return op === 'mm' ? cssVar('--mm') : cssVar('--' + op); }
 
+  // Layers are only added/removed when something changes; dimming is one opacity change on each
+  // pane (composited by the GPU) instead of restyling thousands of canvas shapes.
   function applyVisibility() {
     const dim = !!state.sel;
     const showStops = map.getZoom() >= 14;
-    OP_ORDER.forEach((op) => {
+    DRAW_ORDER.forEach((op) => {
       const on = state.on[op];
       if (on && !map.hasLayer(net[op])) net[op].addTo(map);
       if (!on && map.hasLayer(net[op])) map.removeLayer(net[op]);
-      net[op].eachLayer((l) => l.setStyle({ opacity: dim ? 0.16 : 0.8 }));
       const st = on && showStops;
       if (st && !map.hasLayer(stopLayers[op])) stopLayers[op].addTo(map);
       if (!st && map.hasLayer(stopLayers[op])) map.removeLayer(stopLayers[op]);
-      stopLayers[op].eachLayer((l) => l.setStyle({ opacity: dim ? 0.35 : 1, fillOpacity: dim ? 0.35 : 1 }));
     });
+    map.getPane('network').style.opacity = dim ? '0.2' : '1';
+    map.getPane('stopsPane').style.opacity = dim ? '0.4' : '1';
     hooks.onView();
     $('#hint').hidden = dim;
-    $('#hint').textContent = map.getZoom() >= 14 ? 'Click a line or a stop on the map' : 'Click a line on the map · zoom in to see stops';
+    $('#hint').textContent = showStops ? 'Click a line or a stop on the map' : 'Click a line on the map · zoom in to see stops';
   }
   map.on('zoomend', applyVisibility);
 

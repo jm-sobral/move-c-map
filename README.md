@@ -4,7 +4,8 @@ Interactive map of the public transport operators in the MOVE-C intermodal syste
 SMTUC, Metro Mondego (Metrobus) and SIT Metropolitano. Each operator is a map overlay that can be
 switched on and off.
 
-- **Pick a line** (list, search, or click it on the map): the map draws the route and its stops, and
+- **Pick a line** (list, search, or click it on the map; a road shared by several lines opens a
+  chooser): the map draws the route and its stops, and
   the panel lists every variant, every stop in order (with the other lines calling there), and the
   roads the bus takes, in order, with distances.
 - **Pick a stop** (search, or click it on the map from zoom 14): the panel lists every line that calls

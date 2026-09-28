@@ -23,7 +23,7 @@
   --mm: #0d8a78;
   --sit: #8a3aa8;
   --shadow: 0 1px 2px rgba(20, 30, 45, .08), 0 8px 24px rgba(20, 30, 45, .10);
-  --tile-filter: saturate(.45) contrast(.95) brightness(1.03);
+  --tile-opacity: .72;
   --font-ui: "Atkinson Hyperlegible", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-sign: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
 }
@@ -33,7 +33,7 @@
     --bg: #0e1319; --panel: #151c25; --panel-2: #1b2430; --ink: #e5eaf0; --muted: #a0abb9;
     --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
-    --tile-filter: invert(.9) hue-rotate(180deg) saturate(.35) brightness(1.25) contrast(.8);
+    --tile-opacity: .42;
   }
 }
 :root[data-theme="dark"] {
@@ -41,7 +41,7 @@
   --bg: #0e1319; --panel: #151c25; --panel-2: #1b2430; --ink: #e5eaf0; --muted: #a0abb9;
   --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
-  --tile-filter: invert(.9) hue-rotate(180deg) saturate(.35) brightness(1.25) contrast(.8);
+  --tile-opacity: .42;
 }
 
 * { box-sizing: border-box; }
@@ -213,9 +213,19 @@ button, input { font: inherit; color: inherit; }
 .deps .dh { font-size: 13px; }
 .deps .dm { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
+/* ---------- map picker + tooltips ---------- */
+.tt-lines { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 3px; }
+.pick { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; margin-top: 4px; }
+.pick-row { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: center; padding: 4px; border: 0; background: none; border-radius: 5px; cursor: pointer; text-align: left; font-size: 13px; }
+.pick-row:hover { background: var(--panel-2); }
+/* panel updates (clock every 2 s) must not re-lay out the long line list */
+.nowbar { contain: content; }
+.list > li { content-visibility: auto; contain-intrinsic-size: auto 40px; }
+
 /* ---------- map ---------- */
 #map { height: 100%; width: 100%; background: var(--bg); }
-#map .leaflet-tile-pane { filter: var(--tile-filter); }
+/* plain opacity over the page ground: cheap to composite while panning, unlike a CSS filter */
+#map .leaflet-tile-pane { opacity: var(--tile-opacity); }
 .leaflet-container { font: 13px/1.4 var(--font-ui); }
 .leaflet-tooltip.tt { background: var(--panel); color: var(--ink); border: 1px solid var(--rule); box-shadow: var(--shadow); border-radius: 6px; padding: 5px 8px; }
 .leaflet-tooltip.tt::before { display: none; }
@@ -288,7 +298,7 @@ button, input { font: inherit; color: inherit; }
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="data.js?v=2026-09-25T1735"></script>
-<script src="app.js?v=2026-09-25T1735"></script>
+<script src="data.js?v=2026-09-28T1106"></script>
+<script src="app.js?v=2026-09-28T1106"></script>
 </body>
 </html>
