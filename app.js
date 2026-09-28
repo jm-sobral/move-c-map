@@ -105,13 +105,11 @@
   const map = L.map('map', { preferCanvas: true, zoomControl: true, minZoom: 9, maxZoom: 19 })
     .setView([40.205, -8.43], 12);
   map.createPane('network'); map.getPane('network').style.zIndex = 400;
-  map.createPane('stopsPane'); map.getPane('stopsPane').style.zIndex = 420;
-  map.createPane('sel'); map.getPane('sel').style.zIndex = 450;
-  map.createPane('selStops'); map.getPane('selStops').style.zIndex = 460;
-  const rNet = L.canvas({ pane: 'network', tolerance: 5 });
-  const rStops = L.canvas({ pane: 'stopsPane', tolerance: 3 });
-  const rSel = L.canvas({ pane: 'sel', tolerance: 4 });
-  const rSelStops = L.canvas({ pane: 'selStops', tolerance: 4 });
+  // One canvas for every vector shape. Each canvas takes the clicks for the whole map, so with
+  // stacked canvases the shapes on the lower ones could never be clicked again.
+  const rMain = L.canvas({ pane: 'network', tolerance: 5 });
+  // Dims everything under the current selection; drawn between the network and the selection.
+  const veil = L.rectangle([[-85, -180], [85, 180]], { renderer: rMain, stroke: false, fillOpacity: 0.6, interactive: false });
 
   // OpenStreetMap standard tiles; the dark theme re-tones them with a CSS filter on the tile pane.
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -172,10 +170,11 @@
       if (stopLayers[op]) map.removeLayer(stopLayers[op]);
       // one layer per group of road segments shared by the same lines (built by tools/build.py)
       const g = L.layerGroup();
+      veil.setStyle({ fillColor: cssVar('--bg') });
       const opColour = cssVar('--' + op);
       DATA.net[op].forEach(([parts, ls]) => {
         const c = op === 'mm' ? lineColour(lines[ls[0]]) : opColour;
-        const pl = new FastPolyline(parts.map(decode), { renderer: rNet, color: c, weight: op === 'sit' ? 2.2 : 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' });
+        const pl = new FastPolyline(parts.map(decode), { renderer: rMain, color: c, weight: op === 'sit' ? 2.2 : 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' });
         pl.bindTooltip(() => netTooltip(ls), { sticky: true, className: 'tt', direction: 'top', offset: [0, -6] });
         pl.on('click', (e) => {
           L.DomEvent.stop(e);
@@ -187,7 +186,7 @@
       net[op] = g;
       const sg = L.layerGroup();
       liveStops.filter((s) => s.op === op).forEach((s) => {
-        const m = new FastCircleMarker(s.ll, { renderer: rStops, radius: op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
+        const m = new FastCircleMarker(s.ll, { renderer: rMain, radius: op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
         m.bindTooltip(() => `<b>${esc(s.name)}</b><br>${esc(OPS[op].name)} · ${linesAt(s).length} line(s)`, { className: 'tt', direction: 'top', offset: [0, -4] });
         m.on('click', (e) => { L.DomEvent.stop(e); selectStop(s.i); });
         sg.addLayer(m);
@@ -211,8 +210,13 @@
       if (st && !map.hasLayer(stopLayers[op])) stopLayers[op].addTo(map);
       if (!st && map.hasLayer(stopLayers[op])) map.removeLayer(stopLayers[op]);
     });
-    map.getPane('network').style.opacity = dim ? '0.2' : '1';
-    map.getPane('stopsPane').style.opacity = dim ? '0.4' : '1';
+    if (dim && !map.hasLayer(veil)) veil.addTo(map);
+    if (!dim && map.hasLayer(veil)) map.removeLayer(veil);
+    if (dim) {
+      // layers added since (stops at zoom 14, a re-enabled overlay) must stay under the veil
+      veil.bringToFront();
+      selLayer.eachLayer((l) => l.bringToFront && l.bringToFront());
+    }
     hooks.onView();
     $('#hint').hidden = dim;
     $('#hint').textContent = showStops ? 'Click a line or a stop on the map' : 'Click a line on the map · zoom in to see stops';
@@ -224,12 +228,12 @@
 
   function drawPattern(Ln, p, { casing = true, weight = 5, labels = true, stopsToo = true } = {}) {
     const c = lineColour(Ln);
-    if (casing) L.polyline(p.pts, { renderer: rSel, color: cssVar('--panel'), weight: weight + 5, opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(selLayer);
-    L.polyline(p.pts, { renderer: rSel, color: c, weight, opacity: 1, lineCap: 'round', lineJoin: 'round', interactive: false, dashArray: p.src === 'stops' ? '3 10' : null }).addTo(selLayer);
+    if (casing) L.polyline(p.pts, { renderer: rMain, color: cssVar('--panel'), weight: weight + 5, opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(selLayer);
+    L.polyline(p.pts, { renderer: rMain, color: c, weight, opacity: 1, lineCap: 'round', lineJoin: 'round', interactive: false, dashArray: p.src === 'stops' ? '3 10' : null }).addTo(selLayer);
     if (stopsToo) {
       p.s.forEach((si, k) => {
         const s = stops[si], end = k === 0 || k === p.s.length - 1;
-        const m = L.circleMarker(s.ll, { renderer: rSelStops, radius: end ? 7 : 5, color: end ? cssVar('--ink') : c, weight: end ? 3 : 2.5, fillColor: end ? c : cssVar('--panel'), fillOpacity: 1 });
+        const m = L.circleMarker(s.ll, { renderer: rMain, radius: end ? 7 : 5, color: end ? cssVar('--ink') : c, weight: end ? 3 : 2.5, fillColor: end ? c : cssVar('--panel'), fillOpacity: 1 });
         m.bindTooltip(`<b>${esc(s.name)}</b><br>Stop ${k + 1} of ${p.s.length}`, { className: 'tt', direction: 'top', offset: [0, -5] });
         m.on('click', (e) => { L.DomEvent.stop(e); selectStop(si); });
         m.addTo(selLayer);
@@ -268,14 +272,14 @@
     selLayer.clearLayers();
     const at = linesAt(s);
     at.forEach(({ L: Ln, pats }) => pats.forEach((p) => drawPattern(Ln, p, { casing: true, weight: 3, labels: false, stopsToo: false })));
-    L.circle(s.ll, { renderer: rSel, radius: NEARBY_M, color: cssVar('--muted'), weight: 1.5, dashArray: '4 6', fill: false, interactive: false }).addTo(selLayer);
+    L.circle(s.ll, { renderer: rMain, radius: NEARBY_M, color: cssVar('--muted'), weight: 1.5, dashArray: '4 6', fill: false, interactive: false }).addTo(selLayer);
     nearbyStops(s).forEach(({ s: n }) => {
-      L.circleMarker(n.ll, { renderer: rSelStops, radius: 5, color: lineColourOp(n.op), weight: 2.5, fillColor: cssVar('--panel'), fillOpacity: 1 })
+      L.circleMarker(n.ll, { renderer: rMain, radius: 5, color: lineColourOp(n.op), weight: 2.5, fillColor: cssVar('--panel'), fillOpacity: 1 })
         .bindTooltip(`<b>${esc(n.name)}</b><br>${esc(OPS[n.op].name)}`, { className: 'tt', direction: 'top', offset: [0, -5] })
         .on('click', (e) => { L.DomEvent.stop(e); selectStop(n.i); }).addTo(selLayer);
     });
-    L.circleMarker(s.ll, { renderer: rSelStops, radius: 16, color: cssVar('--ink'), weight: 2, opacity: 0.6, fill: false, interactive: false }).addTo(selLayer);
-    L.circleMarker(s.ll, { renderer: rSelStops, radius: 10, color: cssVar('--panel'), weight: 4, fillColor: lineColourOp(s.op), fillOpacity: 1, interactive: false }).addTo(selLayer);
+    L.circleMarker(s.ll, { renderer: rMain, radius: 16, color: cssVar('--ink'), weight: 2, opacity: 0.6, fill: false, interactive: false }).addTo(selLayer);
+    L.circleMarker(s.ll, { renderer: rMain, radius: 10, color: cssVar('--panel'), weight: 4, fillColor: lineColourOp(s.op), fillOpacity: 1, interactive: false }).addTo(selLayer);
     applyVisibility();
     if (fit) map.setView(s.ll, Math.max(map.getZoom(), 16));
     if (push) setHash(`stop-${si}`);
