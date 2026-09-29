@@ -821,6 +821,119 @@
   const slowTimer = setTimeout(() => { if (!veh.ready) $('#vstats').textContent = 'Still downloading timetables (1 MB)…'; }, 8000);
   document.head.appendChild(ttScript);
 
+  // ------------------------------------------------------------------ user location
+  // The position stays in the browser: it is only used to draw the dot and centre the map.
+  const REGION = L.latLngBounds([39.8, -8.95], [40.7, -7.65]); // Região de Coimbra, with margin
+  const me = { ll: null, dot: null, acc: null, watch: null, state: 'idle', autoCentre: false, userAsked: false };
+  const LOC_MSG = {
+    idle: 'Show my location',
+    locating: 'Finding your location…',
+    on: 'Centre on my location',
+    denied: 'Location is blocked for this site. Allow it in the browser settings to see your position.',
+    unavailable: 'Your location is not available right now.',
+    insecure: 'Location only works when the site is opened over https.',
+    unsupported: 'This browser cannot share its location.',
+  };
+
+  let locBtn = null;
+  const LocateControl = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd() {
+      const bar = L.DomUtil.create('div', 'leaflet-bar locate-bar');
+      locBtn = L.DomUtil.create('button', 'locate-btn', bar);
+      locBtn.type = 'button';
+      locBtn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+      L.DomEvent.disableClickPropagation(bar);
+      L.DomEvent.on(locBtn, 'click', () => locate({ userAsked: true }));
+      setLocState(me.state);
+      return bar;
+    },
+  });
+  new LocateControl().addTo(map);
+
+  function setLocState(s) {
+    me.state = s;
+    if (!locBtn) return;
+    locBtn.dataset.state = s;
+    locBtn.title = LOC_MSG[s];
+    locBtn.setAttribute('aria-label', LOC_MSG[s]);
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 6000);
+  }
+
+  function centreOnMe() {
+    if (!me.ll) return;
+    if (REGION.contains(me.ll)) map.setView(me.ll, Math.max(map.getZoom(), 15));
+    else if (me.userAsked) toast('You are outside the Região de Coimbra, so the map stays where it is.');
+  }
+
+  function onPosition(pos) {
+    const { latitude, longitude, accuracy } = pos.coords;
+    me.ll = [latitude, longitude];
+    const acc = Math.round(accuracy);
+    if (!me.dot) {
+      me.dot = L.marker(me.ll, {
+        icon: L.divIcon({ className: 'me-wrap', iconSize: [0, 0], html: '<span class="me-dot"></span>' }),
+        keyboard: false, zIndexOffset: 1000,
+      }).addTo(map);
+      // on the shared canvas: a second canvas would block clicks on the network again
+      me.acc = L.circle(me.ll, { renderer: rMain, radius: acc, interactive: false, weight: 1 }).addTo(map);
+    }
+    me.dot.setLatLng(me.ll).bindTooltip(`You are here · within ${fmtM(acc)}`, { className: 'tt', direction: 'top', offset: [0, -10] });
+    me.acc.setLatLng(me.ll).setRadius(Math.min(acc, 2000))
+      .setStyle({ color: cssVar('--focus'), fillColor: cssVar('--focus'), fillOpacity: 0.1, opacity: acc > 2000 ? 0 : 0.5 });
+    const first = me.state !== 'on';
+    setLocState('on');
+    if (me.userAsked || (first && me.autoCentre && !state.sel)) centreOnMe();
+    me.userAsked = false;
+    me.autoCentre = false;
+  }
+
+  function onPositionError(err) {
+    const state = err.code === 1 ? 'denied' : 'unavailable';
+    if (err.code === 1) stopWatching();
+    // on the automatic first try, stay quiet; the button still explains what happened
+    if (me.userAsked) toast(LOC_MSG[state]);
+    me.userAsked = false;
+    me.autoCentre = false;
+    if (me.state !== 'on' || err.code === 1) setLocState(state);
+  }
+
+  function startWatching() {
+    if (me.watch != null) return;
+    me.watch = navigator.geolocation.watchPosition(onPosition, onPositionError, { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 });
+  }
+  function stopWatching() {
+    if (me.watch != null) navigator.geolocation.clearWatch(me.watch);
+    me.watch = null;
+  }
+
+  function locate({ userAsked = false, autoCentre = false } = {}) {
+    if (!('geolocation' in navigator)) { setLocState('unsupported'); if (userAsked) toast(LOC_MSG.unsupported); return; }
+    if (!window.isSecureContext) { setLocState('insecure'); if (userAsked) toast(LOC_MSG.insecure); return; }
+    me.userAsked = userAsked;
+    me.autoCentre = autoCentre;
+    if (userAsked && me.state === 'on' && me.ll) { centreOnMe(); me.userAsked = false; return; }
+    if (me.state === 'denied' && me.watch == null && !userAsked) return;
+    setLocState('locating');
+    stopWatching();
+    startWatching();
+  }
+
+  // Pause GPS while the tab is hidden (battery); resume without moving the map.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopWatching();
+    else if (me.state === 'on') startWatching();
+  });
+  // Once the user moves the map or picks something, a late first fix must not yank the view.
+  map.on('dragstart', () => { me.autoCentre = false; });
+
   // ------------------------------------------------------------------ theme changes
   function retheme() {
     buildNetwork();
@@ -837,6 +950,10 @@
   renderToggles();
   buildNetwork();
   renderView();
-  requestAnimationFrame(() => { map.invalidateSize(); readHash(); });
+  requestAnimationFrame(() => {
+    map.invalidateSize(); readHash();
+    // centre on the visitor only when the page did not open on a linked line or stop
+    locate({ autoCentre: !state.sel });
+  });
   window.addEventListener('hashchange', readHash);
 })();

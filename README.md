@@ -16,6 +16,11 @@ switched on and off.
   (dashed badge). Click a vehicle for its next stop. "Change time" shows the network at any date and
   time the timetables cover (GPS only applies to the current time).
 - **Next departures** at the selected stop, for the next 3 hours.
+- **Your location**: on first visit the browser asks to share your location. If you allow it and are in
+  the Região de Coimbra, the map centres on you (unless the page was opened on a linked line or stop),
+  and a blue dot with an accuracy ring follows you while the page is visible. The locate button
+  (under the zoom buttons) brings the map back to you. The position never leaves the browser.
+  Browsers only share location with pages served over https (or localhost).
 - Deep links: `#line-sit-205`, `#line-smtuc-38`, `#line-mm-U1`, `#stop-<n>`.
 
 ## Run

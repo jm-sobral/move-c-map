@@ -257,7 +257,22 @@ button, input { font: inherit; color: inherit; }
   .foot { display: none; }
   .map-hint { bottom: 12px; font-size: 12px; }
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* ---------- user location ---------- */
+.locate-btn { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 4px; background: var(--panel); color: var(--ink); cursor: pointer; }
+.locate-btn:hover { background: var(--panel-2); }
+.locate-btn[data-state="on"] { color: var(--focus); }
+.locate-btn[data-state="locating"] svg { animation: loc-pulse 1s ease-in-out infinite; }
+.locate-btn[data-state="denied"], .locate-btn[data-state="unavailable"], .locate-btn[data-state="insecure"], .locate-btn[data-state="unsupported"] { color: var(--faint); }
+.me-wrap { background: none; border: 0; }
+.me-dot { position: absolute; width: 16px; height: 16px; transform: translate(-50%, -50%); border-radius: 50%; background: var(--focus); border: 3px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25), 0 1px 4px rgba(0,0,0,.4); }
+.me-dot::after { content: ""; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid var(--focus); animation: me-ring 2s ease-out infinite; }
+@keyframes me-ring { from { transform: scale(.5); opacity: .8; } to { transform: scale(1.4); opacity: 0; } }
+@keyframes loc-pulse { 50% { opacity: .35; } }
+.map-toast {
+  position: absolute; left: 50%; top: 16px; transform: translateX(-50%); z-index: 460; max-width: min(90%, 420px);
+  background: var(--ink); color: var(--panel); border-radius: 8px; padding: 8px 14px; font-size: 13px; box-shadow: var(--shadow); text-align: center;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } .me-dot::after, .locate-btn svg { animation: none !important; } }
 </style>
 </head>
 <body>
@@ -295,10 +310,11 @@ button, input { font: inherit; color: inherit; }
 <div class="mapwrap">
   <div id="map" role="region" aria-label="Map"></div>
   <div class="map-hint" id="hint">Click a line or a stop on the map</div>
+  <div class="map-toast" id="toast" role="status" hidden></div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="data.js?v=2026-09-28T1106"></script>
-<script src="app.js?v=2026-09-28T1150"></script>
+<script src="app.js?v=2026-09-29T1000"></script>
 </body>
 </html>
