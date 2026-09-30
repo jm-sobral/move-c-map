@@ -14,7 +14,7 @@ under ODbL 1.0.
 |---|---|---|---|
 | NeTEx EPIP exports for SMTUC, SIT Metropolitano and Metro Mondego (`api.planner.agit.pt`), published 2026-09-23 | AGIT – Agência para a Gestão do Sistema Intermodal da Região de Coimbra | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Stops, lines, schedule variants, trip stop times and calendars |
 | "Rede Metrobus" KMZ ([dados.gov.pt](https://dados.gov.pt/pt/datasets/metro-mondego/)), 2026-08-17 | Metro Mondego, S.A. | CC BY | Metrobus route geometry |
-| OpenStreetMap road network, routed with [OSRM](https://project-osrm.org/) | © OpenStreetMap contributors | [ODbL 1.0](https://www.openstreetmap.org/copyright) | SIT and SMTUC route paths, road names |
+| OpenStreetMap road network, routed with [OSRM](https://project-osrm.org/) | © OpenStreetMap contributors | [ODbL 1.0](https://www.openstreetmap.org/copyright) | SIT and SMTUC route paths, road names, walking distances between stops |
 
 Live SMTUC vehicle positions are fetched by the visitor's browser from AGIT's realtime API
 (`api.planner.agit.pt/v1/datasets/smtuc/realtime/vehicles`) and are not part of this repository. The

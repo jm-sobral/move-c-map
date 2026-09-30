@@ -15,6 +15,12 @@
   // ------------------------------------------------------------------ helpers
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // bring the start of the detail view into sight after it changes (the whole panel scrolls)
+  function showViewTop() {
+    const p = document.getElementById('panel'), v = document.getElementById('view');
+    const d = v.getBoundingClientRect().top - p.getBoundingClientRect().top;
+    if (d < 0 || d > p.clientHeight - 160) p.scrollTop += d - 8;
+  }
   const fold = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
   function decode(str) {
@@ -92,7 +98,10 @@
   }
 
   // Filled in by the vehicles module once timetables load; keeps the rest of the app independent of it.
-  const hooks = { onView() {}, departuresHtml() { return ''; }, lineLiveHtml() { return ''; } };
+  const hooks = {
+    onView() {}, departuresHtml() { return ''; }, lineLiveHtml() { return ''; },
+    planButtonsHtml() { return ''; }, planRender(v) { v.innerHTML = ''; }, planLines() { return new Set(); }, planFromHash() {},
+  };
 
   // ------------------------------------------------------------------ state
   const state = {
@@ -263,7 +272,7 @@
     if (fit) map.fitBounds(L.latLngBounds(Ln.pats[pi].pts), { ...panelPad(), maxZoom: 16 });
     if (push) setHash(`line-${Ln.op}-${Ln.code}`);
     renderView();
-    $('#view').scrollTop = 0;
+    showViewTop();
   }
 
   function selectStop(si, { fit = true, push = true } = {}) {
@@ -284,7 +293,7 @@
     if (fit) map.setView(s.ll, Math.max(map.getZoom(), 16));
     if (push) setHash(`stop-${si}`);
     renderView();
-    $('#view').scrollTop = 0;
+    showViewTop();
   }
 
   function clearSel() {
@@ -313,6 +322,8 @@
       const Ln = lines.find((l) => l.op === m[1] && l.code === m[2]);
       if (Ln) return selectLine(Ln.li, 0, { push: false });
     }
+    m = h.match(/^plan-(\d+)-(\d+)$/);
+    if (m) return hooks.planFromHash(+m[1], +m[2]);
     m = h.match(/^stop-(\d+)$/);
     if (m && stops[+m[1]]) return selectStop(+m[1], { push: false });
   }
@@ -332,7 +343,7 @@
     const b = e.target.closest('.op-toggle'); if (!b) return;
     const op = b.dataset.op; state.on[op] = !state.on[op];
     b.setAttribute('aria-pressed', state.on[op]);
-    if (!state.on[op] && state.sel) {
+    if (!state.on[op] && state.sel && state.sel.type !== 'plan') {
       const selOp = state.sel.type === 'line' ? lines[state.sel.li].op : stops[state.sel.si].op;
       if (selOp === op) { clearSel(); return; }
     }
@@ -345,6 +356,7 @@
     const v = $('#view');
     if (state.sel?.type === 'line') v.innerHTML = lineView();
     else if (state.sel?.type === 'stop') v.innerHTML = stopView();
+    else if (state.sel?.type === 'plan') hooks.planRender(v);
     else v.innerHTML = homeView();
   }
 
@@ -451,6 +463,7 @@
       <button type="button" class="back" data-act="home">← All lines</button>
       <div class="d-head"><span class="stop-ico" style="--c:var(--${s.op})"><i style="width:18px;height:18px;border-width:4px"></i></span>
         <div><h2>${esc(s.name)}</h2><div class="op">${esc(OPS[s.op].name)}${s.code ? ` · stop ${esc(s.code)}` : ''}</div></div></div>
+      ${hooks.planButtonsHtml(s)}
       <div class="section" id="deps">${hooks.departuresHtml(s)}</div>
       <div class="section"><span class="label">Lines stopping here · ${at.length}</span><div class="served">${served || '<p class="empty">No scheduled service at this stop.</p>'}</div></div>
       <div class="section"><span class="label">Within ${NEARBY_M} m walk · ${allCodes.size} lines in total</span>
@@ -596,6 +609,7 @@
     if (!state.on[Ln.op]) return false;
     if (state.sel?.type === 'line') return li === state.sel.li;
     if (state.sel?.type === 'stop') return stops[state.sel.si].serves.some((x) => x.li === li);
+    if (state.sel?.type === 'plan') return hooks.planLines().has(li);
     return true;
   }
 
@@ -933,6 +947,342 @@
   });
   // Once the user moves the map or picks something, a late first fix must not yank the view.
   map.on('dragstart', () => { me.autoCentre = false; });
+
+  // ------------------------------------------------------------------ journey planner (RAPTOR)
+  // Round k finds the earliest arrival at every stop using at most k vehicles; walking transfers
+  // (<= 400 m on foot, from tools/walk_fetch.py) are allowed after each ride and before the first.
+  const MAX_RIDES = 3;   // up to two changes
+  const CHANGE_S = 60;   // minimum slack to change vehicle
+  const WALK_MPS = 1.2;  // walking speed
+  const plan = { from: null, to: null, after: null, options: null, key: '', chosen: 0 };
+  const netCache = new Map();
+  let walkIdx = null;
+
+  function walksFrom(si) {
+    if (!walkIdx) {
+      walkIdx = new Map();
+      const w = veh.tt.walk || [];
+      for (let i = 0; i < w.length; i += 3) {
+        if (!walkIdx.has(w[i])) walkIdx.set(w[i], []);
+        walkIdx.get(w[i]).push([w[i + 1], Math.ceil(w[i + 2] / WALK_MPS), w[i + 2]]);
+      }
+    }
+    return walkIdx.get(si) || [];
+  }
+
+  // Trips running on a service day, grouped by pattern; yesterday's trips past midnight included.
+  function network(date) {
+    if (netCache.has(date)) return netCache.get(date);
+    const pats = new Map(), stopPats = new Map();
+    const add = (i, shift) => {
+      const r = veh.tt.j[i], prof = veh.tt.prof[r[4]], key = r[0] + ':' + r[1];
+      if (r[3] + shift + prof[prof.length - 2] < 0) return;
+      if (!pats.has(key)) pats.set(key, { li: r[0], pi: r[1], s: lines[r[0]].pats[r[1]].s, trips: [] });
+      pats.get(key).trips.push({ i, t0: r[3] + shift, prof });
+    };
+    dayRows(date).forEach((i) => add(i, 0));
+    dayRows(addDays(date, -1)).forEach((i) => add(i, -86400));
+    pats.forEach((P, key) => P.s.forEach((si, idx) => {
+      if (!stopPats.has(si)) stopPats.set(si, []);
+      stopPats.get(si).push([key, idx]);
+    }));
+    const net = { pats, stopPats };
+    netCache.set(date, net);
+    if (netCache.size > 3) netCache.delete(netCache.keys().next().value);
+    return net;
+  }
+
+  function earliestTrip(P, idx, t) {
+    let best = null, bd = Infinity;
+    for (const tr of P.trips) {
+      const d = tr.t0 + tr.prof[2 * idx + 1];
+      if (d >= t && d < bd) { bd = d; best = tr; }
+    }
+    return best;
+  }
+
+  function raptor(net, from, to, T) {
+    const N = stops.length;
+    const tau = [new Float64Array(N).fill(Infinity)], rnd = [new Int8Array(N)];
+    const rideP = [new Map()], walkP = [new Map()];
+    tau[0][from] = T;
+    let marked = new Set([from]);
+    for (const [j, secs, m] of walksFrom(from)) {
+      if (T + secs < tau[0][j]) { tau[0][j] = T + secs; walkP[0].set(j, { from, secs, m, t: T + secs }); marked.add(j); }
+    }
+    const best = tau[0].slice();
+    for (let k = 1; k <= MAX_RIDES && marked.size; k++) {
+      tau[k] = tau[k - 1].slice(); rnd[k] = rnd[k - 1].slice();
+      rideP[k] = new Map(); walkP[k] = new Map();
+      const Q = new Map();
+      for (const si of marked) {
+        for (const [key, idx] of net.stopPats.get(si) || []) if (!Q.has(key) || idx < Q.get(key)) Q.set(key, idx);
+      }
+      for (const [key, idx0] of Q) {
+        const P = net.pats.get(key);
+        let trip = null, board = -1, boardStop = -1, boardRound = 0;
+        for (let i = idx0; i < P.s.length; i++) {
+          const si = P.s[i];
+          if (trip) {
+            const a = trip.t0 + trip.prof[2 * i];
+            if (a < Math.min(best[si], best[to])) {
+              tau[k][si] = a; rnd[k][si] = k; best[si] = a;
+              rideP[k].set(si, { key, trip, board, alight: i, boardStop, boardRound, t: a });
+            }
+          }
+          const t = tau[k - 1][si];
+          if (t < Infinity && i < P.s.length - 1) {
+            const ready = t + (k > 1 ? CHANGE_S : 0);
+            if (!trip || ready <= trip.t0 + trip.prof[2 * i + 1]) {
+              const cand = earliestTrip(P, i, ready);
+              if (cand && (!trip || cand.t0 + cand.prof[2 * i + 1] < trip.t0 + trip.prof[2 * i + 1])) {
+                trip = cand; board = i; boardStop = si; boardRound = rnd[k - 1][si];
+              }
+            }
+          }
+        }
+      }
+      // walk on from where the rides of this round got off (never walk twice in a row)
+      for (const [si, e] of [...rideP[k]]) {
+        for (const [j, secs, m] of walksFrom(si)) {
+          const t = e.t + secs;
+          if (t < best[j] && t < best[to]) { tau[k][j] = t; rnd[k][j] = k; best[j] = t; walkP[k].set(j, { from: si, secs, m, t }); }
+        }
+      }
+      marked = new Set([...rideP[k].keys(), ...walkP[k].keys()]);
+    }
+    return { tau, rnd, rideP, walkP };
+  }
+
+  function backtrack(res, k, to) {
+    const legs = [];
+    let r = res.rnd[k][to], s = to, mustRide = false;
+    for (let guard = 0; guard < 12; guard++) {
+      const W = mustRide ? null : res.walkP[r].get(s), R = res.rideP[r] && res.rideP[r].get(s);
+      if (W && W.t === res.tau[r][s]) {
+        legs.unshift({ type: 'walk', from: W.from, to: s, secs: W.secs, m: W.m, arr: W.t });
+        s = W.from; mustRide = r > 0;
+        if (r === 0) break;
+        continue;
+      }
+      if (!R) break;
+      legs.unshift({ type: 'ride', li: veh.tt.j[R.trip.i][0], pi: veh.tt.j[R.trip.i][1], trip: R.trip, board: R.board, alight: R.alight,
+        from: R.boardStop, to: s, dep: R.trip.t0 + R.trip.prof[2 * R.board + 1], arr: R.t });
+      s = R.boardStop; r = R.boardRound; mustRide = false;
+    }
+    return legs;
+  }
+
+  function journeysFrom(net, from, to, T) {
+    const res = raptor(net, from, to, T);
+    const out = [];
+    let lastArr = Infinity;
+    for (let k = 1; k < res.tau.length; k++) {
+      const a = res.tau[k][to];
+      if (a < lastArr && res.rnd[k][to] === k) {
+        const legs = backtrack(res, k, to);
+        // arriving at the sibling stop point of the destination (same spot, or same name) is arriving
+        const last = legs[legs.length - 1];
+        if (last && last.type === 'walk' && legs.length > 1 && (last.m < 30 || stops[last.from].name === stops[last.to].name)) legs.pop();
+        const rides = legs.filter((l) => l.type === 'ride');
+        if (rides.length) {
+          const walkBefore = legs[0].type === 'walk' ? legs[0].secs : 0;
+          out.push({ legs, rides: rides.length, dep: rides[0].dep - walkBefore, arr: legs[legs.length - 1].arr, walkM: legs.filter((l) => l.type === 'walk').reduce((x, l) => x + l.m, 0) });
+          lastArr = a;
+        }
+      }
+    }
+    return out;
+  }
+
+  // A few journeys: the best ones leaving from T, then the next departures after each.
+  function planJourneys() {
+    const { date, secs } = lisbon(nowMs());
+    const net = network(date);
+    let T = plan.after != null ? plan.after : secs;
+    const seen = new Set(), opts = [];
+    for (let n = 0; n < 4 && opts.length < 5; n++) {
+      const found = journeysFrom(net, plan.from, plan.to, T);
+      if (!found.length) break;
+      for (const j of found) {
+        const sig = j.legs.map((l) => (l.type === 'ride' ? l.trip.i : 'w')).join('>');
+        if (!seen.has(sig)) { seen.add(sig); opts.push(j); }
+      }
+      T = Math.min(...found.map((j) => j.legs.find((l) => l.type === 'ride').dep)) + 60;
+    }
+    // drop journeys another one beats outright: leaves no earlier, arrives no later, no more changes
+    const beats = (b, a) => b !== a && b.dep >= a.dep && b.arr <= a.arr && b.rides <= a.rides
+      && (b.dep > a.dep || b.arr < a.arr || b.rides < a.rides || b.walkM < a.walkM);
+    const kept = opts.filter((a) => !opts.some((b) => beats(b, a)));
+    kept.sort((a, b) => a.dep - b.dep || a.arr - b.arr);
+    return { date, from: plan.after != null ? plan.after : secs, opts: kept.slice(0, 5) };
+  }
+
+  // --- geometry of a ride: the part of its route between boarding and alighting
+  function rideGeometry(leg) {
+    const p = lines[leg.li].pats[leg.pi], c = cum(p);
+    const d0 = p.sd[leg.board], d1 = p.sd[leg.alight];
+    const pts = [pointAt(p, d0)];
+    for (let i = 0; i < p.pts.length; i++) if (c[i] > d0 && c[i] < d1) pts.push(p.pts[i]);
+    pts.push(pointAt(p, d1));
+    return pts;
+  }
+
+  function drawJourney(opt) {
+    selLayer.clearLayers();
+    const bounds = L.latLngBounds([]);
+    opt.legs.forEach((leg) => {
+      if (leg.type === 'walk') {
+        const ll = [stops[leg.from].ll, stops[leg.to].ll];
+        L.polyline(ll, { renderer: rMain, color: cssVar('--ink'), weight: 3, dashArray: '2 7', lineCap: 'round', interactive: false }).addTo(selLayer);
+        ll.forEach((x) => bounds.extend(x));
+        return;
+      }
+      const Ln = lines[leg.li], c = lineColour(Ln), pts = rideGeometry(leg);
+      L.polyline(pts, { renderer: rMain, color: cssVar('--panel'), weight: 10, opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(selLayer);
+      L.polyline(pts, { renderer: rMain, color: c, weight: 5, lineCap: 'round', lineJoin: 'round', interactive: false }).addTo(selLayer);
+      pts.forEach((x) => bounds.extend(x));
+      const p = Ln.pats[leg.pi];
+      for (let k = leg.board; k <= leg.alight; k++) {
+        const si = p.s[k], end = k === leg.board || k === leg.alight;
+        L.circleMarker(stops[si].ll, { renderer: rMain, radius: end ? 6 : 3.5, color: end ? cssVar('--ink') : c, weight: end ? 3 : 2, fillColor: cssVar('--panel'), fillOpacity: 1 })
+          .bindTooltip(`<b>${esc(stops[si].name)}</b>`, { className: 'tt', direction: 'top', offset: [0, -5] })
+          .on('click', (e) => { L.DomEvent.stop(e); selectStop(si); }).addTo(selLayer);
+      }
+    });
+    [[plan.from, 'From'], [plan.to, 'To']].forEach(([si, w]) => {
+      L.tooltip({ permanent: true, direction: 'top', className: 'endlabel', offset: [0, -10], interactive: false })
+        .setLatLng(stops[si].ll).setContent(`${w}: ${esc(stops[si].name)}`).addTo(selLayer);
+    });
+    return bounds;
+  }
+
+  // --- panel
+  function setPlanEnd(which, si) {
+    plan[which] = si;
+    plan.options = null; plan.after = null; plan.chosen = 0;
+    renderPlanBar();
+    if (plan.from != null && plan.to != null) showPlan();
+    else renderView();
+  }
+  function clearPlan() {
+    plan.from = plan.to = plan.after = null; plan.options = null;
+    renderPlanBar();
+    if (state.sel?.type === 'plan') clearSel(); else renderView();
+  }
+  function showPlan({ push = true } = {}) {
+    state.sel = { type: 'plan' };
+    renderView();
+    if (push) setHash(`plan-${plan.from}-${plan.to}`);
+    showViewTop();
+  }
+
+  function renderPlanBar() {
+    const bar = $('#planbar');
+    if (plan.from == null && plan.to == null) { bar.hidden = true; return; }
+    bar.hidden = false;
+    const end = (si, label, which) => si == null
+      ? `<span class="pe empty"><span class="pl">${label}</span>Pick a stop: search or click one on the map</span>`
+      : `<span class="pe"><span class="pl">${label}</span><button type="button" class="linklike" data-stop="${si}">${esc(stops[si].name)}</button><button type="button" class="px" data-plan-clear="${which}" aria-label="Remove ${label.toLowerCase()} stop">×</button></span>`;
+    bar.innerHTML = `<div class="pb-head"><span class="label">Journey</span>
+      <span class="pb-act">${plan.from != null && plan.to != null ? '<button type="button" class="linklike small" data-plan-act="swap">Swap</button><button type="button" class="linklike small" data-plan-act="show">Show journeys</button>' : ''}<button type="button" class="linklike small" data-plan-act="clear">Clear</button></span></div>
+      ${end(plan.from, 'From', 'from')}${end(plan.to, 'To', 'to')}`;
+  }
+  $('#planbar').addEventListener('click', (e) => {
+    const t = e.target.closest('[data-plan-act],[data-plan-clear],[data-stop]');
+    if (!t) return;
+    if (t.dataset.stop) return selectStop(+t.dataset.stop);
+    if (t.dataset.planClear) return setPlanEnd(t.dataset.planClear, null);
+    const act = t.dataset.planAct;
+    if (act === 'clear') return clearPlan();
+    if (act === 'swap') { [plan.from, plan.to] = [plan.to, plan.from]; plan.options = null; plan.after = null; renderPlanBar(); return showPlan(); }
+    if (act === 'show') return showPlan();
+  });
+
+  const dur = (s) => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`; };
+
+  hooks.planButtonsHtml = (s) => `<div class="plan-btns">
+      <button type="button" class="btn ghost" data-plan-set="from" data-si="${s.i}"${plan.from === s.i ? ' aria-pressed="true"' : ''}>From here</button>
+      <button type="button" class="btn ghost" data-plan-set="to" data-si="${s.i}"${plan.to === s.i ? ' aria-pressed="true"' : ''}>To here</button></div>`;
+  $('#view').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-plan-set],[data-opt],[data-plan-later]');
+    if (!b) return;
+    e.stopPropagation();
+    if (b.dataset.planSet) return setPlanEnd(b.dataset.planSet, +b.dataset.si);
+    if (b.dataset.opt) { plan.chosen = +b.dataset.opt; return renderView(); }
+    if (b.dataset.planLater) { plan.after = +b.dataset.planLater; plan.options = null; plan.chosen = 0; renderView(); }
+  }, true);
+
+  hooks.planView = () => {
+    const A = stops[plan.from], B = stops[plan.to];
+    let body;
+    if (plan.from === plan.to) body = '<p class="note">Pick two different stops.</p>';
+    else if (!veh.ready) body = '<p class="note">Loading timetables…</p>';
+    else {
+      const key = `${plan.from}-${plan.to}-${plan.after}-${Math.floor(nowMs() / 60000)}`;
+      if (!plan.options || plan.key.split('-').slice(0, 3).join('-') !== key.split('-').slice(0, 3).join('-')) {
+        const t0 = performance.now();
+        plan.options = planJourneys(); plan.key = key; plan.ms = Math.round(performance.now() - t0);
+        plan.chosen = Math.min(plan.chosen, Math.max(0, plan.options.opts.length - 1));
+      }
+      const { opts, from } = plan.options;
+      if (!opts.length) body = `<p class="note">No journey found from ${hhmm(from)} with up to ${MAX_RIDES - 1} changes and walks of up to 400 m. Try a later time, or a stop on a main line.</p>`;
+      else {
+        const cards = opts.map((o, n) => {
+          // short changes between stop points on the same spot are not worth a "walk" chip
+          const chain = o.legs.filter((l) => l.type === 'ride' || l.m >= 30)
+            .map((l) => (l.type === 'ride' ? badge(lines[l.li], 'sm') : `<span class="walk-ico" title="Walk ${fmtM(l.m)}">walk</span>`)).join('<span class="chev">›</span>');
+          return `<button type="button" class="variant opt" data-opt="${n}" aria-pressed="${n === plan.chosen}" style="--c:var(--focus)">
+            <span class="to">${hhmm(o.dep)} → ${hhmm(o.arr)}</span><span class="km">${dur(o.arr - o.dep)}</span>
+            <span class="meta"><span class="chain">${chain}</span>${o.rides - 1 ? `${o.rides - 1} change${o.rides > 2 ? 's' : ''}` : 'Direct'}${o.walkM ? ` · ${fmtM(o.walkM)} walk` : ''}</span></button>`;
+        }).join('');
+        const o = opts[plan.chosen];
+        const legs = o.legs.map((l, n) => {
+          if (l.type === 'walk') {
+            // a walk is timed to reach the next vehicle, not from when the search started
+            const next = o.legs[n + 1], start = next && next.type === 'ride' ? next.dep - l.secs : l.arr - l.secs;
+            const toStop = `<button type="button" class="linklike" data-stop="${l.to}">${esc(stops[l.to].name)}</button>`;
+            const what = l.m < 30 ? (n === 0 ? `Start from the ${esc(OPS[stops[l.to].op].name)} stop ${toStop}, at the same place` : `Change here to the ${esc(OPS[stops[l.to].op].name)} stop ${toStop}`)
+              : stops[l.from].name === stops[l.to].name ? `Cross to the other ${toStop} stop (${fmtM(l.m)}, ${dur(l.secs)})`
+                : `Walk ${fmtM(l.m)} (${dur(l.secs)}) to ${toStop}`;
+            return `<li class="leg walk"><span class="lt">${hhmm(start)}</span><div>${what}</div></li>`;
+          }
+          const p = lines[l.li].pats[l.pi];
+          return `<li class="leg ride" style="--c:${lineColour(lines[l.li])}"><span class="lt">${hhmm(l.dep)}</span><div>${badge(lines[l.li], 'sm')} <b>To ${esc(headsign(p))}</b>
+            <div>Board at <button type="button" class="linklike" data-stop="${l.from}">${esc(stops[l.from].name)}</button></div>
+            <div class="muted">${l.alight - l.board} stop${l.alight - l.board === 1 ? '' : 's'} · ${dur(l.arr - l.dep)}</div>
+            <div>Get off at <button type="button" class="linklike" data-stop="${l.to}">${esc(stops[l.to].name)}</button> · ${hhmm(l.arr)}</div></div></li>`;
+        }).join('');
+        const last = opts[opts.length - 1].legs.find((l) => l.type === 'ride').dep;
+        body = `<div class="variants">${cards}</div>
+          <button type="button" class="linklike small later" data-plan-later="${last + 60}">Later journeys</button>
+          <div class="section"><span class="label">Journey ${plan.chosen + 1} step by step</span><ol class="legs">${legs}</ol>
+          <p class="note" style="margin:0">Scheduled times, with at least 1 min to change and walking at 4 km/h. Delays are not taken into account.</p></div>`;
+      }
+    }
+    const when = plan.options ? hhmm(plan.options.from) : hhmm(lisbon(nowMs()).secs);
+    return `<button type="button" class="back" data-act="home">← All lines</button>
+      <div class="d-head"><span class="walk-ico big" aria-hidden="true">A→B</span><div><h2>${esc(A.name)} → ${esc(B.name)}</h2>
+      <div class="op">Leaving from ${when}${veh.offsetMs ? ' (chosen time)' : ''} · ${esc(OPS[A.op].name)} → ${esc(OPS[B.op].name)}</div></div></div>
+      <div class="section">${body}</div>`;
+  };
+  let fitted = '';
+  hooks.planRender = (v) => {
+    v.innerHTML = hooks.planView();
+    const has = plan.options && plan.options.opts.length;
+    const bounds = has ? drawJourney(plan.options.opts[plan.chosen]) : (selLayer.clearLayers(), null);
+    applyVisibility();
+    const fk = plan.key + ':' + plan.chosen;
+    if (bounds && bounds.isValid() && fk !== fitted) { fitted = fk; map.fitBounds(bounds, { ...panelPad(), maxZoom: 16 }); }
+  };
+  hooks.planLines = () => {
+    if (!plan.options || !plan.options.opts.length) return new Set();
+    return new Set(plan.options.opts[plan.chosen].legs.filter((l) => l.type === 'ride').map((l) => l.li));
+  };
+  hooks.planFromHash = (a, b) => {
+    if (!stops[a] || !stops[b]) return;
+    plan.from = a; plan.to = b; plan.options = null; renderPlanBar(); showPlan({ push: false });
+  };
 
   // ------------------------------------------------------------------ theme changes
   function retheme() {

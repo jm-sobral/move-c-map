@@ -5,6 +5,7 @@ Sources
 - SMTUC GTFS (dados.gov.pt): official SMTUC shapes, only with --smtuc-shapes (dataset has no licence yet).
 - Rede Metrobus KMZ (dados.gov.pt): Metrobus corridor axes, used to trace Metro Mondego patterns.
 - OSRM (router.project-osrm.org) road routes through the stops: SIT/SMTUC geometry and road names.
+- OSRM foot profile (routing.openstreetmap.de) via tools/walk_fetch.py: walking transfers (walks.json).
 """
 import csv, glob, hashlib, heapq, json, math, os, re, sys, collections, datetime
 
@@ -482,7 +483,30 @@ for op, d in ops.items():
         c = [cal_idx[(op, x)] for x in j['cal']]
         li, pi = idx[id(p)]
         rows.append([li, pi, c[0] if len(c) == 1 else c, start, prof_idx[key], j['trip'] if op == 'smtuc' else 0])
-tt = {'generated': STAMP, 'cal': cals, 'prof': profs, 'j': rows}
+# walking transfers for the journey planner: served stops within WALK_MAX_M on foot (tools/walk_fetch.py)
+WALK_MAX_M = 400
+walk = []
+served = sorted({si for L in out_lines for p in L['pats'] for si in p['s']})
+at_coord = collections.defaultdict(list)
+for si in served:
+    at_coord[f'{stops_out[si][2]},{stops_out[si][3]}'].append(si)
+for group in at_coord.values():  # separate stop points at the very same spot
+    for a in group:
+        for b in group:
+            if a != b:
+                walk += [a, b, 0]
+if os.path.exists('walks.json'):
+    for key, m in json.load(open('walks.json')).items():
+        if m is None or m > WALK_MAX_M:
+            continue
+        ca, cb = key.split('|')
+        for a in at_coord.get(ca, []):
+            for b in at_coord.get(cb, []):
+                walk += [a, b, m]
+else:
+    print('walks.json not found: journey planner will only change at the same stop')
+print('walking transfers', len(walk) // 3)
+tt = {'generated': STAMP, 'cal': cals, 'prof': profs, 'j': rows, 'walk': walk}
 tjs = 'window.TIMETABLE=' + json.dumps(tt, ensure_ascii=False, separators=(',', ':')) + ';\n'
 tpath = os.path.join(os.path.dirname(os.path.abspath(OUT)), 'timetable.js')
 open(tpath, 'w', encoding='utf-8').write(tjs)

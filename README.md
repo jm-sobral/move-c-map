@@ -21,7 +21,12 @@ switched on and off.
   and a blue dot with an accuracy ring follows you while the page is visible. The locate button
   (under the zoom buttons) brings the map back to you. The position never leaves the browser.
   Browsers only share location with pages served over https (or localhost).
-- Deep links: `#line-sit-205`, `#line-smtuc-38`, `#line-mm-U1`, `#stop-<n>`.
+- **Plan a journey**: on a stop, press "From here", then on another stop "To here". The planner
+  searches every SMTUC, Metrobus and SIT trip on that day's timetable, with up to two changes and walks
+  of up to 400 m between stops (real walking distances, so it never walks across the river). It lists
+  up to five journeys from the current or chosen time, draws the selected one on the map, and shows
+  its vehicles. Times are scheduled; delays are not taken into account. CP trains are not included yet.
+- Deep links: `#line-sit-205`, `#line-smtuc-38`, `#line-mm-U1`, `#stop-<n>`, `#plan-<from>-<to>`.
 
 ## Run
 
@@ -40,6 +45,7 @@ internet access and should be served over http (not opened as a `file://`).
 | Metro Mondego route geometry | "Rede Metrobus" KMZ, dados.gov.pt | Stops joined along the official corridor axes |
 | Timetables and calendars (all operators) | Same AGIT NeTEx exports | Every trip's stop times; shipped as `timetable.js` |
 | SMTUC live vehicle positions | `api.planner.agit.pt/v1/datasets/smtuc/realtime/vehicles`, read by the browser every 30 s | Not stored in the repo. Licence still "pending operator confirmation" in the feed metadata |
+| Walking transfers for the planner | OSRM foot profile on OpenStreetMap (routing.openstreetmap.de) | Stop pairs within 400 m on foot; shipped in `timetable.js` |
 | SIT and SMTUC route geometry, road names | OSRM on OpenStreetMap | Neither published dataset has licensed shapes, so paths are computed stop to stop on the road network and can differ from the real route on short stretches |
 
 Stretches where the computed road route is far longer than the distance between the two stops
@@ -57,6 +63,9 @@ Scripts in `tools/` (Python 3, standard library only):
 2. `python tools/parse_netex.py data/<op>/netex.xml <op>.json` for `sit`, `smtuc`, `metro-mondego`.
 3. `python tools/osrm_fetch.py sit.json smtuc.json`: road-routes every unique stop sequence
    (about 1,500 requests at 1 per second; results cached in `osrm_cache/`, re-runs resume).
-4. `python tools/build.py data.js`: writes `data.js` and `timetable.js`, the two bundles the page loads. Add `--smtuc-shapes` (with the
+4. `python tools/walk_fetch.py sit.json smtuc.json metro-mondego.json`: walking distances between stops
+   within 400 m of each other, for the journey planner (about 100 requests; cached in `walk_cache/`,
+   output `walks.json`).
+5. `python tools/build.py data.js`: writes `data.js` and `timetable.js`, the two bundles the page loads. Add `--smtuc-shapes` (with the
    SMTUC GTFS unzipped in `data/gsm/`) to use the official SMTUC shapes; that dataset has no licence
    yet, so don't publish a bundle built this way.
