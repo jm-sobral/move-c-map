@@ -22,6 +22,7 @@
   --smtuc: #d99a06;
   --mm: #0d8a78;
   --sit: #8a3aa8;
+  --cp: #262b33;
   --shadow: 0 1px 2px rgba(20, 30, 45, .08), 0 8px 24px rgba(20, 30, 45, .10);
   --tile-opacity: .72;
   --font-ui: "Atkinson Hyperlegible", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -31,7 +32,7 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --bg: #0e1319; --panel: #151c25; --panel-2: #1b2430; --ink: #e5eaf0; --muted: #a0abb9;
-    --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8;
+    --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8; --cp: #dfe3e9;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
     --tile-opacity: .42;
   }
@@ -39,7 +40,7 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0e1319; --panel: #151c25; --panel-2: #1b2430; --ink: #e5eaf0; --muted: #a0abb9;
-  --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8;
+  --faint: #6f7b8a; --rule: #273241; --focus: #7db4ea; --smtuc: #f0b429; --mm: #2bb7a2; --sit: #c07ad8; --cp: #dfe3e9;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
   --tile-opacity: .42;
 }
@@ -78,6 +79,9 @@ button, input { font: inherit; color: inherit; }
 .op-toggle[aria-pressed="true"] .sw { background: var(--c); }
 .op-toggle[aria-pressed="true"] .sw::after { content: ""; width: 8px; height: 5px; border: 2px solid #fff; border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
 .op-toggle .nm { font-weight: 700; }
+/* the CP swatch is near-black in light and near-white in dark, so its tick takes the panel colour */
+.op-toggle[data-op="cp"] .sw::after { border-color: var(--panel); }
+.pill.nc { border: 1px solid var(--muted); color: var(--muted); text-transform: none; letter-spacing: 0; font-family: var(--font-ui); margin-left: 4px; }
 .op-toggle .nm small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
 .op-toggle .ct { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
 
@@ -287,6 +291,14 @@ button, input { font: inherit; color: inherit; }
 .leg .muted { color: var(--muted); font-size: 12px; }
 @media (max-width: 760px) { .planbar { margin: 0 16px 6px; } }
 
+/* ---------- new version available ---------- */
+.update-bar {
+  position: absolute; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 470; max-width: min(92%, 440px);
+  display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 14px; border-radius: 10px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--focus); box-shadow: var(--shadow); font-size: 13px;
+}
+.update-bar .btn { flex: none; }
+
 /* ---------- user location ---------- */
 .locate-btn { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 4px; background: var(--panel); color: var(--ink); cursor: pointer; }
 .locate-btn:hover { background: var(--panel-2); }
@@ -309,7 +321,7 @@ button, input { font: inherit; color: inherit; }
 <aside id="panel" aria-label="Network explorer">
   <header class="masthead">
     <h1>MOVE-C <span class="tag">Região de Coimbra</span></h1>
-    <p>Lines and stops of SMTUC, Metro Mondego and SIT Metropolitano on one map.</p>
+    <p>Lines and stops of SMTUC, Metro Mondego, SIT Metropolitano and CP trains on one map.</p>
   </header>
   <div class="overlays" role="group" aria-labelledby="ovl-label">
     <span class="label" id="ovl-label">Overlays</span>
@@ -342,10 +354,11 @@ button, input { font: inherit; color: inherit; }
   <div id="map" role="region" aria-label="Map"></div>
   <div class="map-hint" id="hint">Click a line or a stop on the map</div>
   <div class="map-toast" id="toast" role="status" hidden></div>
+  <div class="update-bar" id="update" role="status" hidden>A newer version of the map is available. <button type="button" class="btn" id="update-reload">Reload</button></div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="data.js?v=2026-09-30T1522"></script>
-<script src="app.js?v=2026-09-30T1522"></script>
+<script src="data.js?v=2026-10-01T1141"></script>
+<script src="app.js?v=2026-10-01T1141"></script>
 </body>
 </html>

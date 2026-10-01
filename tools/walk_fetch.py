@@ -4,7 +4,8 @@ Candidate pairs are served stops (any operator) within MAX_M in a straight line.
 distances come from the OSRM foot profile on OpenStreetMap (routing.openstreetmap.de), so a pair on
 opposite banks of the Mondego gets the detour via the bridge, not the straight line.
 Pairs are packed into shared distance tables of up to 100 points (1 request per second).
-Requests are cached in walk_cache/, so re-runs only fetch what is new. Writes walks.json:
+Pairs already in walks.json are kept and not fetched again; requests are also cached in walk_cache/.
+Writes walks.json:
 {"lat,lon|lat,lon": metres} for every candidate pair, both directions.
 """
 import hashlib, json, math, os, sys, time, urllib.request, collections
@@ -73,12 +74,19 @@ def main(files):
     pts = served_coords(files)
     pairs = candidate_pairs(pts)
     print('served stop locations', len(pts), 'candidate pairs within', MAX_M, 'm:', len(pairs), flush=True)
+    # pairs measured on an earlier run are kept; only new ones are fetched (adding stops reshuffles
+    # how pairs pack into tables, so the table cache alone would refetch almost everything)
+    known = json.load(open('walks.json')) if os.path.exists('walks.json') else {}
+    key = lambda i, j: f'{pts[i][0]},{pts[i][1]}|{pts[j][0]},{pts[j][1]}'
+    out = {k: v for k, v in known.items()}
+    pairs = [(i, j) for i, j in pairs if key(i, j) not in known or key(j, i) not in known]
+    print('already measured:', len(known) // 2, 'pairs; to fetch:', len(pairs), flush=True)
     pair_set = set(pairs)
     by_stop = collections.defaultdict(list)
     for i, j in pairs:
         by_stop[i].append(j)
         by_stop[j].append(i)
-    covered, out, batch, n_req = set(), {}, [], 0
+    covered, batch, n_req = set(), [], 0
 
     def flush(batch):
         nonlocal n_req
@@ -98,7 +106,7 @@ def main(files):
                     covered.add((min(i, j), max(i, j)))
                     d = dist[pos[i]][pos[j]]
                     if d is not None:
-                        out[f'{pts[i][0]},{pts[i][1]}|{pts[j][0]},{pts[j][1]}'] = round(d)
+                        out[key(i, j)] = round(d)
 
     members = set()
     for i, j in pairs:
@@ -119,8 +127,8 @@ def main(files):
         flush(batch)
     json.dump(out, open('walks.json', 'w'))
     walkable = sum(1 for d in out.values() if d <= MAX_M)
-    print('done:', len(covered), 'pairs covered,', walkable // 2 if walkable else 0, 'about walkable within',
-          MAX_M, 'm (both directions:', walkable, '), new requests', n_req, flush=True)
+    print('done:', len(covered), 'new pairs measured,', walkable, 'one-way walks within', MAX_M, 'm in total,',
+          'new requests', n_req, flush=True)
 
 
 if __name__ == '__main__':

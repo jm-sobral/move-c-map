@@ -6,6 +6,7 @@ Sources
 - Rede Metrobus KMZ (dados.gov.pt): Metrobus corridor axes, used to trace Metro Mondego patterns.
 - OSRM (router.project-osrm.org) road routes through the stops: SIT/SMTUC geometry and road names.
 - OSRM foot profile (routing.openstreetmap.de) via tools/walk_fetch.py: walking transfers (walks.json).
+- CP GTFS (publico.cp.pt, CC0) via tools/parse_gtfs_cp.py: trains in the region (cp.json).
 """
 import csv, glob, hashlib, heapq, json, math, os, re, sys, collections, datetime
 
@@ -100,7 +101,8 @@ def length(pts):
 
 # ---------------------------------------------------------------- inputs
 ops = {k: json.load(open(f'{f}.json', encoding='utf-8'))
-       for k, f in [('smtuc', 'smtuc'), ('mm', 'metro-mondego'), ('sit', 'sit')]}
+       for k, f in [('smtuc', 'smtuc'), ('mm', 'metro-mondego'), ('sit', 'sit'), ('cp', 'cp')]
+       if k != 'cp' or os.path.exists('cp.json')}  # cp.json from tools/parse_gtfs_cp.py
 
 
 def pattern_key(coords):
@@ -334,11 +336,14 @@ for op, d in ops.items():
     for L in d['lines']:
         code = L['name'] if op == 'mm' else L['short']
         colour_name = L['short'] if op == 'mm' else None
-        key = (op, code)
+        # CP codes are service types (R, IC...) shared by several lines: key those by corridor
+        key = (op, L['slug']) if op == 'cp' else (op, code)
         if key not in lines_out:
             lines_out[key] = {'op': op, 'code': code, 'name': None if op == 'mm' else L['name'],
                               'color': ('#' + L['color']) if L.get('color') else None,
                               'colourName': colour_name, 'pats': []}
+            if op == 'cp':
+                lines_out[key].update({'slug': L['slug'], 'movec': L['movec'], 'typeName': L['typeName']})
         LO = lines_out[key]
         seen = {}
         for P in L['patterns']:
@@ -361,6 +366,8 @@ for op, d in ops.items():
                 roads = oroads
             elif op == 'mm':
                 geom, src = trace_kmz(coords), 'kmz'
+            elif op == 'cp':
+                geom, src = [tuple(x) for x in P['geom']], P.get('geom_src', 'stations')
             else:
                 roads = oroads
             if geom is None and og:
@@ -375,6 +382,8 @@ for op, d in ops.items():
                 's': [stop_index[(op, s)] for s in P['stops']],
                 'g': encode(g), 'sd': stop_dists(g, coords), 'km': round(length(geom) / 1000, 1),
                 'r': roads or [], 'n': P['trips'], 'f': P['first'], 'l': P['last'], 'src': src}
+            if P.get('head'):
+                pat['h'] = P['head']  # a train's real destination when the map stops at the boundary
             LO['pats'].append(pat)
             seen[sig] = pat
             pid_map[P['id']] = pat
@@ -382,7 +391,7 @@ for op, d in ops.items():
 
 def sort_key(L):
     m = re.match(r'([A-Z]*)(\d*)(.*)', L['code'])
-    return (L['op'], m.group(1), int(m.group(2) or 0), m.group(3))
+    return (L['op'], m.group(1), int(m.group(2) or 0), m.group(3), L['name'] or '')
 
 
 out_lines = sorted(lines_out.values(), key=sort_key)
@@ -445,7 +454,7 @@ def network_chains(op):
     return [[parts, list(ls)] for ls, parts in groups.items()]
 
 
-net = {op: network_chains(op) for op in ('smtuc', 'mm', 'sit')}
+net = {op: network_chains(op) for op in ops}
 print('network groups', {op: len(c) for op, c in net.items()})
 for L in out_lines:
     for p in L['pats']:
@@ -458,6 +467,7 @@ bundle = {
         'AGIT NeTEx EPIP (api.planner.agit.pt), 2026-09-23, CC BY 4.0',
         'Rede Metrobus KMZ, Metro Mondego (dados.gov.pt), 2026-08-17, CC BY',
         *(['SMTUC GTFS (dados.gov.pt), 2026-09-14'] if SMTUC_SHAPES else []),
+        *([f"CP GTFS (publico.cp.pt), {ops['cp'].get('feed_date', '')}, CC0"] if 'cp' in ops else []),
         'Road paths: OSRM on © OpenStreetMap contributors, ODbL 1.0'],
     'stops': stops_out, 'lines': out_lines}
 # ---------------------------------------------------------------- timetable bundle

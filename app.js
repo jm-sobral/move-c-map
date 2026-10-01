@@ -6,8 +6,9 @@
     smtuc: { name: 'SMTUC', long: 'Urban buses, Coimbra', full: 'Serviços Municipalizados de Transportes Urbanos de Coimbra' },
     mm: { name: 'Metro Mondego', long: 'Metrobus BRT', full: 'Metro Mondego — Sistema de Mobilidade do Mondego' },
     sit: { name: 'SIT Metropolitano', long: 'Regional buses, 19 municipalities', full: 'SIT Metropolitano da Região de Coimbra' },
+    cp: { name: 'CP', long: 'Trains, Comboios de Portugal', full: 'CP – Comboios de Portugal' },
   };
-  const OP_ORDER = ['smtuc', 'mm', 'sit'];
+  const OP_ORDER = ['smtuc', 'mm', 'sit', 'cp'];
   const NEARBY_M = 250;
   // Metrobus colours as published, softened where they vanish on a light basemap.
   const COLOUR_FIX = { '#00FF40': '#1f9d4a', '#FF0000': '#d6282b', '#0080FF': '#1673d1' };
@@ -67,12 +68,16 @@
   const lines = DATA.lines.map((L, li) => ({ ...L, li, pats: L.pats.map((p, pi) => ({ ...p, pi, pts: decode(p.g) })) }));
   lines.forEach((L) => L.pats.forEach((p) => p.s.forEach((si, pos) => stops[si].serves.push({ li: L.li, pi: p.pi, pos }))));
   const liveStops = stops.filter((s) => s.serves.length);
+  // Links name stops by operator + stop code, which survive a data rebuild; array positions do not.
+  const stopKey = (s) => `${s.op}-${s.code}`;
+  const stopByKey = new Map(stops.map((s) => [stopKey(s), s.i]));
 
   function lineColour(L) {
     if (L.op === 'mm' && L.color) return COLOUR_FIX[L.color.toUpperCase()] || L.color;
     return cssVar('--' + L.op);
   }
-  function headsign(p) { return stops[p.s[p.s.length - 1]].name; }
+  // trains carry their real destination (h) when the map stops at the region's boundary
+  function headsign(p) { return p.h || stops[p.s[p.s.length - 1]].name; }
   function origin(p) { return stops[p.s[0]].name; }
   function linesAt(stop) {
     const m = new Map();
@@ -105,7 +110,7 @@
 
   // ------------------------------------------------------------------ state
   const state = {
-    on: { smtuc: true, mm: true, sit: true },
+    on: Object.fromEntries(OP_ORDER.map((op) => [op, true])), // every overlay starts switched on
     sel: null, // {type:'line', li, pi} | {type:'stop', si}
     q: '',
   };
@@ -164,7 +169,7 @@
   });
 
   const net = {}, stopLayers = {};
-  const DRAW_ORDER = ['sit', 'smtuc', 'mm']; // regional lines under urban ones
+  const DRAW_ORDER = ['cp', 'sit', 'smtuc', 'mm']; // railway and regional lines under urban ones
   function netTooltip(ls) {
     const shown = ls.slice(0, 8).map((li) => badge(lines[li], 'sm')).join(' ');
     return `<div class="tt-lines">${shown}${ls.length > 8 ? ` +${ls.length - 8}` : ''}</div>${ls.length === 1 ? esc(lineTitle(lines[ls[0]])) : 'Click to choose a line'}`;
@@ -183,7 +188,8 @@
       const opColour = cssVar('--' + op);
       DATA.net[op].forEach(([parts, ls]) => {
         const c = op === 'mm' ? lineColour(lines[ls[0]]) : opColour;
-        const pl = new FastPolyline(parts.map(decode), { renderer: rMain, color: c, weight: op === 'sit' ? 2.2 : 3, opacity: 0.8, lineCap: 'round', lineJoin: 'round' });
+        const ll = parts.map(decode);
+        const pl = new FastPolyline(ll, { renderer: rMain, color: c, weight: op === 'sit' ? 2.2 : op === 'cp' ? 4.5 : 3, opacity: op === 'cp' ? 0.9 : 0.8, lineCap: 'round', lineJoin: 'round' });
         pl.bindTooltip(() => netTooltip(ls), { sticky: true, className: 'tt', direction: 'top', offset: [0, -6] });
         pl.on('click', (e) => {
           L.DomEvent.stop(e);
@@ -191,11 +197,13 @@
           else L.popup({ className: 'veh-pop', maxWidth: 300 }).setLatLng(e.latlng).setContent(netPopup(ls)).openOn(map);
         });
         g.addLayer(pl);
+        // railway symbol: light dashes along the dark line
+        if (op === 'cp') g.addLayer(new FastPolyline(ll, { renderer: rMain, color: cssVar('--panel'), weight: 1.6, dashArray: '6 8', opacity: 0.9, interactive: false }));
       });
       net[op] = g;
       const sg = L.layerGroup();
       liveStops.filter((s) => s.op === op).forEach((s) => {
-        const m = new FastCircleMarker(s.ll, { renderer: rMain, radius: op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
+        const m = new FastCircleMarker(s.ll, { renderer: rMain, radius: op === 'cp' ? 5.5 : op === 'mm' ? 4.5 : 3.5, color: lineColourOp(op), weight: op === 'cp' ? 3 : 2, fillColor: cssVar('--panel'), fillOpacity: 1 });
         m.bindTooltip(() => `<b>${esc(s.name)}</b><br>${esc(OPS[op].name)} · ${linesAt(s).length} line(s)`, { className: 'tt', direction: 'top', offset: [0, -4] });
         m.on('click', (e) => { L.DomEvent.stop(e); selectStop(s.i); });
         sg.addLayer(m);
@@ -270,7 +278,7 @@
     drawPattern(Ln, Ln.pats[pi]);
     applyVisibility();
     if (fit) map.fitBounds(L.latLngBounds(Ln.pats[pi].pts), { ...panelPad(), maxZoom: 16 });
-    if (push) setHash(`line-${Ln.op}-${Ln.code}`);
+    if (push) setHash(`line-${Ln.op}-${Ln.slug || Ln.code}`);
     renderView();
     showViewTop();
   }
@@ -291,7 +299,7 @@
     L.circleMarker(s.ll, { renderer: rMain, radius: 10, color: cssVar('--panel'), weight: 4, fillColor: lineColourOp(s.op), fillOpacity: 1, interactive: false }).addTo(selLayer);
     applyVisibility();
     if (fit) map.setView(s.ll, Math.max(map.getZoom(), 16));
-    if (push) setHash(`stop-${si}`);
+    if (push) setHash(`stop-${stopKey(s)}`);
     renderView();
     showViewTop();
   }
@@ -317,11 +325,16 @@
   }
   function readHash() {
     const h = decodeURIComponent(location.hash.slice(1));
-    let m = h.match(/^line-(smtuc|mm|sit)-(.+)$/);
+    let m = h.match(/^line-(smtuc|mm|sit|cp)-(.+)$/);
     if (m) {
-      const Ln = lines.find((l) => l.op === m[1] && l.code === m[2]);
+      const Ln = lines.find((l) => l.op === m[1] && (l.slug || l.code) === m[2]);
       if (Ln) return selectLine(Ln.li, 0, { push: false });
     }
+    m = h.match(/^plan-([a-z]+-\w+)~([a-z]+-\w+)$/);
+    if (m && stopByKey.has(m[1]) && stopByKey.has(m[2])) return hooks.planFromHash(stopByKey.get(m[1]), stopByKey.get(m[2]));
+    m = h.match(/^stop-([a-z]+-\w+)$/);
+    if (m && stopByKey.has(m[1])) return selectStop(stopByKey.get(m[1]), { push: false });
+    // links from before stop codes were used: numbers, valid only for the build that made them
     m = h.match(/^plan-(\d+)-(\d+)$/);
     if (m) return hooks.planFromHash(+m[1], +m[2]);
     m = h.match(/^stop-(\d+)$/);
@@ -361,7 +374,8 @@
   }
 
   function lineRow(Ln) {
-    const via = Ln.op === 'mm' ? (Ln.colourName ? `Linha ${Ln.colourName}` : '') : '';
+    const via = Ln.op === 'mm' ? (Ln.colourName ? `Linha ${Ln.colourName}` : '')
+      : Ln.op === 'cp' ? `${Ln.typeName}${Ln.movec ? '' : ' · not covered by MOVE-C'}` : '';
     return `<li><button type="button" class="row" data-line="${Ln.li}">${badge(Ln)}<span class="t">${esc(lineTitle(Ln))}${via ? `<small>${esc(via)}</small>` : ''}</span></button></li>`;
   }
 
@@ -371,16 +385,21 @@
     if (q) {
       const ls = lines.filter((l) => state.on[l.op] && (fold(l.code) === q || fold(l.code).startsWith(q) || fold(lineTitle(l)).includes(q)))
         .sort((a, b) => (fold(b.code) === q) - (fold(a.code) === q));
-      const seen = new Set(), ss = [];
+      // exact name first, then names starting with the search, then any match
+      const seen = new Set(), found = [];
       for (const s of liveStops) {
-        if (!state.on[s.op] || !fold(s.name).includes(q)) continue;
-        const k = s.op + '|' + s.name; if (seen.has(k)) continue; seen.add(k); ss.push(s);
-        if (ss.length >= 40) break;
+        const n = fold(s.name);
+        if (!state.on[s.op] || !n.includes(q)) continue;
+        const k = s.op + '|' + s.name; if (seen.has(k)) continue; seen.add(k);
+        found.push({ s, rank: n === q ? 0 : n.startsWith(q) ? 1 : 2 });
       }
-      if (ls.length) html += `<div class="group-h"><span class="label">Lines</span><span class="label">${ls.length}</span></div><ul class="list">${ls.slice(0, 60).map(lineRow).join('')}</ul>`;
+      found.sort((a, b) => a.rank - b.rank);
+      const ss = found.slice(0, 40).map((f) => f.s);
+      // stops first: picking two stops is how journeys are planned
       if (ss.length) html += `<div class="group-h"><span class="label">Stops</span><span class="label">${ss.length}${ss.length >= 40 ? '+' : ''}</span></div><ul class="list">${ss.map((s) => `
         <li><button type="button" class="row" data-stop="${s.i}"><span class="stop-ico" style="--c:var(--${s.op})"><i></i></span>
-        <span class="t">${esc(s.name)}<small>${esc(OPS[s.op].name)} · ${linesAt(s).map((e) => e.L.code).slice(0, 8).join(', ')}</small></span></button></li>`).join('')}</ul>`;
+        <span class="t">${esc(s.name)}<small>${esc(OPS[s.op].name)} · ${[...new Set(linesAt(s).map((e) => e.L.code))].slice(0, 8).join(', ')}</small></span></button></li>`).join('')}</ul>`;
+      if (ls.length) html += `<div class="group-h"><span class="label">Lines</span><span class="label">${ls.length}</span></div><ul class="list">${ls.slice(0, 60).map(lineRow).join('')}</ul>`;
       if (!html) html = `<p class="empty">Nothing matches “${esc(state.q)}” in the overlays that are switched on.</p>`;
       return html;
     }
@@ -396,6 +415,9 @@
     kmz: 'Route traced along the official Metrobus corridor (Metro Mondego network file).',
     osrm: 'Path computed between consecutive stops on the OpenStreetMap road network. Short stretches may differ from the real bus route.',
     stops: 'No road path computed for this variant yet. The dashed line joins the stops in order and does not follow roads.',
+    stations: 'CP does not publish track shapes. The line is drawn through every station along the railway, so curves between stations are simplified.',
+    rail: 'CP does not publish track shapes. The route is traced along the railway tracks mapped in OpenStreetMap.',
+    'rail-partial': 'CP does not publish track shapes. The route is traced along the railway tracks mapped in OpenStreetMap, except a short stretch drawn straight between stations where the mapped track is incomplete.',
   };
 
   function roadLabel(r) {
@@ -408,7 +430,11 @@
 
   function lineView() {
     const Ln = lines[state.sel.li], p = Ln.pats[state.sel.pi], c = lineColour(Ln);
-    const opName = OPS[Ln.op].name + (Ln.op === 'mm' && Ln.colourName ? ` · Linha ${Ln.colourName}` : '');
+    const opName = OPS[Ln.op].name + (Ln.op === 'mm' && Ln.colourName ? ` · Linha ${Ln.colourName}` : '') + (Ln.op === 'cp' ? ` · ${Ln.typeName}` : '');
+    // which CP services MOVE-C covers is not published per service type; this is the working assumption
+    const movecNote = Ln.op !== 'cp' ? '' : Ln.movec
+      ? '<p class="note" style="margin:0 0 10px">Covered by MOVE-C passes within the Região de Coimbra (Urbano, Regional and InterRegional trains).</p>'
+      : '<p class="note" style="margin:0 0 10px">Not covered by MOVE-C as far as we know: Intercidades and Alfa Pendular usually need a CP ticket.</p>';
     const variants = Ln.pats.map((q) => `
       <button type="button" class="variant" data-pat="${q.pi}" aria-pressed="${q.pi === p.pi}" style="--c:${c}">
         <span class="to">To ${esc(headsign(q))}</span><span class="km">${fmtKm(q.km)}</span>
@@ -426,12 +452,13 @@
 
     const roads = p.r.length
       ? `<ol class="roads">${p.r.map(([n, m]) => `<li><span>${roadLabel(n)}</span><span>${fmtM(m)}</span></li>`).join('')}</ol>`
-      : `<p class="note">${Ln.op === 'mm' ? 'Metrobus runs on its own dedicated busway for most of the route; road names are not listed.' : 'Road names are not available for this variant.'}</p>`;
+      : `<p class="note">${Ln.op === 'mm' ? 'Metrobus runs on its own dedicated busway for most of the route; road names are not listed.'
+        : Ln.op === 'cp' ? 'Trains run on the railway, so no roads are listed.' : 'Road names are not available for this variant.'}</p>`;
 
     return `
       <button type="button" class="back" data-act="home">← All lines</button>
       <div class="d-head">${badge(Ln)}<div><h2>${esc(lineTitle(Ln))}</h2><div class="op">${esc(opName)}</div></div></div>
-      ${hooks.lineLiveHtml(Ln)}
+      ${movecNote}${hooks.lineLiveHtml(Ln)}
       <div class="section"><span class="label">Variants · ${Ln.pats.length}</span><div class="variants">${variants}</div></div>
       <div class="section"><span class="label">Stops · ${p.s.length}</span><p class="note" style="margin:0">Badges show other lines that also call at the stop.</p><ol class="stops" style="--c:${c}">${stopList}</ol></div>
       <div class="section"><span class="label">Roads taken, in order</span>${roads}<p class="note" style="margin:0">${esc(SRC_NOTE[p.src] || '')}</p></div>`;
@@ -638,7 +665,7 @@
     if (!veh.ready) return;
     renderClock();
     veh.markers.forEach((m) => { m._seen = false; });
-    const counts = { smtuc: [0, 0], mm: [0, 0], sit: [0, 0] };
+    const counts = Object.fromEntries(OP_ORDER.map((op) => [op, [0, 0]]));
     veh.active = veh.on ? computeActive() : [];
     if (veh.on) {
       const live = veh.offsetMs === 0;
@@ -1173,7 +1200,7 @@
   function showPlan({ push = true } = {}) {
     state.sel = { type: 'plan' };
     renderView();
-    if (push) setHash(`plan-${plan.from}-${plan.to}`);
+    if (push) setHash(`plan-${stopKey(stops[plan.from])}~${stopKey(stops[plan.to])}`);
     showViewTop();
   }
 
@@ -1199,6 +1226,11 @@
     if (act === 'show') return showPlan();
   });
 
+  // Intercidades / Alfa Pendular legs: shown, but flagged as outside MOVE-C
+  function notCovered(o) {
+    const nc = [...new Set(o.legs.filter((l) => l.type === 'ride' && lines[l.li].movec === false).map((l) => lines[l.li].code))];
+    return nc.length ? ` <span class="pill nc">${esc(nc.join(', '))} not covered by MOVE-C</span>` : '';
+  }
   const dur = (s) => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`; };
 
   hooks.planButtonsHtml = (s) => `<div class="plan-btns">
@@ -1234,7 +1266,7 @@
             .map((l) => (l.type === 'ride' ? badge(lines[l.li], 'sm') : `<span class="walk-ico" title="Walk ${fmtM(l.m)}">walk</span>`)).join('<span class="chev">›</span>');
           return `<button type="button" class="variant opt" data-opt="${n}" aria-pressed="${n === plan.chosen}" style="--c:var(--focus)">
             <span class="to">${hhmm(o.dep)} → ${hhmm(o.arr)}</span><span class="km">${dur(o.arr - o.dep)}</span>
-            <span class="meta"><span class="chain">${chain}</span>${o.rides - 1 ? `${o.rides - 1} change${o.rides > 2 ? 's' : ''}` : 'Direct'}${o.walkM ? ` · ${fmtM(o.walkM)} walk` : ''}</span></button>`;
+            <span class="meta"><span class="chain">${chain}</span>${o.rides - 1 ? `${o.rides - 1} change${o.rides > 2 ? 's' : ''}` : 'Direct'}${o.walkM ? ` · ${fmtM(o.walkM)} walk` : ''}${notCovered(o)}</span></button>`;
         }).join('');
         const o = opts[plan.chosen];
         const legs = o.legs.map((l, n) => {
@@ -1283,6 +1315,31 @@
     if (!stops[a] || !stops[b]) return;
     plan.from = a; plan.to = b; plan.options = null; renderPlanBar(); showPlan({ push: false });
   };
+
+  // ------------------------------------------------------------------ new version check
+  // GitHub Pages lets browsers keep index.html for 10 minutes, so after a deploy a visitor can sit on
+  // the previous version. Every few minutes, revalidate the page (a 304 when nothing changed) and
+  // compare its app.js stamp with the running one; if it moved, offer a reload. Revalidating also
+  // refreshes the cached copy, so a plain reload gets the new page.
+  const VERSION_EVERY_MS = 5 * 60 * 1000;
+  const stampOf = (html) => (html.match(/src="app\.js\?v=([^"]+)"/) || [])[1] || null;
+  const runningStamp = stampOf(document.documentElement.outerHTML);
+  let lastVersionCheck = Date.now();
+  async function checkVersion() {
+    if (!runningStamp || location.protocol === 'file:' || !$('#update').hidden) return;
+    lastVersionCheck = Date.now();
+    try {
+      const res = await fetch(location.href.split('#')[0], { cache: 'no-cache' });
+      if (!res.ok) return;
+      const fresh = stampOf(await res.text());
+      if (fresh && fresh !== runningStamp) $('#update').hidden = false;
+    } catch (err) { /* offline or blocked: try again next time */ }
+  }
+  setInterval(() => { if (!document.hidden) checkVersion(); }, VERSION_EVERY_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - lastVersionCheck > VERSION_EVERY_MS) checkVersion();
+  });
+  $('#update-reload').addEventListener('click', () => location.reload());
 
   // ------------------------------------------------------------------ theme changes
   function retheme() {
